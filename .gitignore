@@ -1,0 +1,18 @@
+# YouTube login cookies: never commit
+cookies.txt
+*.cookies.txt
+
+# local app state
+app_settings.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# per-video work (source videos, audio, transcripts, rendered clips)
+jobs/
+*.mp4
+*.mkv
+*.webm
+*.wav
