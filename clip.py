@@ -16,6 +16,8 @@ Usage:
   python clip.py run <url-or-file> [--preset blur] [--count 8] [--picker auto]
   python clip.py run <url-or-file> --from render        # re-render after editing highlights.json
   python clip.py frame <url-or-file> --at 600            # save a still to measure a facecam box
+  python clip.py result <job> 3 tiktok --views 12000 --likes 900   # log how a posted clip did
+  python clip.py learn --open                             # retune the score to your audience
 """
 import argparse
 import glob
@@ -790,6 +792,20 @@ def cmd_run(args):
             break
 
 
+def cmd_result(args):
+    import learn
+    n = learn.add_result(args.job, args.clip, args.platform, args.views, args.likes, args.comments, args.shares,
+                         args.url or "")
+    log(f"result saved ({n} logged in total). Run 'python clip.py learn' to update the score weights.")
+
+
+def cmd_learn(args):
+    import learn
+    learn.learn(log=log)
+    if args.open:
+        os.startfile(str(learn.RESULTS)) if os.name == "nt" else None
+
+
 def cmd_frame(args):
     JOBS.mkdir(exist_ok=True)
     job = JOBS / job_name_for(args.source, args.name)
@@ -834,6 +850,21 @@ def main():
     r.add_argument("--no-jump-cuts", action="store_true", help="keep quiet pauses instead of cutting them out")
     r.add_argument("--hashtags", default="", help="hashtags every post caption must include, e.g. \"#lany\"")
     r.set_defaults(func=cmd_run)
+
+    res = sub.add_parser("result", help="log how a posted clip did (phase 4 learning loop)")
+    res.add_argument("job", help="job folder name, e.g. tJbzMqJGH4k")
+    res.add_argument("clip", type=int, help="clip number (clip_03.mp4 -> 3)")
+    res.add_argument("platform", choices=["tiktok", "reels", "shorts"])
+    res.add_argument("--views", type=int, required=True)
+    res.add_argument("--likes", type=int, default=0)
+    res.add_argument("--comments", type=int, default=0)
+    res.add_argument("--shares", type=int, default=0)
+    res.add_argument("--url", default="")
+    res.set_defaults(func=cmd_result)
+
+    lr = sub.add_parser("learn", help="retune the score from logged results, write results.html")
+    lr.add_argument("--open", action="store_true", help="open results.html afterwards")
+    lr.set_defaults(func=cmd_learn)
 
     f = sub.add_parser("frame", help="save a still frame (to set up a facecam preset)")
     f.add_argument("source")

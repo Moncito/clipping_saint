@@ -48,10 +48,18 @@
   Weak/duplicate AI captions fall back to templates. Saved as `clips/clip_NN_post.txt` and shown
   in the report with Copy buttons. Never auto-posted.
 
-### Phase 4 — Learn from real results (the part Opus can't do for *you*)
-- `performance.csv`: after posting, you add views / likes / watch time per clip.
-- Compare predicted score vs real views; reweight Hook/Flow/Value/Trend for *your* audience
-  (Tier 1-2 SEA, gaming + music campaigns). After ~30 posted clips the score becomes yours.
+### Phase 4 — Learn from real results (the part Opus can't do for *you*)  ✅ built
+- Log results: app **Results (learn)** tab, or `python clip.py result <job> <clip> <platform> --views ...`
+  → `performance.csv` (gitignored, personal).
+- `python clip.py learn --open` / **Learn + open dashboard**: views are log-scaled and compared
+  within each platform; ridge regression re-weights Hook/Flow/Value/Trend, blended with the default
+  equal weights (starts at 10 posted clips, full trust at 50). Saved to `calibration.json`; every
+  new score uses it (report says "tuned to your real views").
+- `results.html`: does the score predict views (rank correlation before/after), current weights,
+  patterns in the measured signals (e.g. "less dead air got more views"), and every posted clip
+  with its engagement rate vs the campaign minimum for its view tier.
+- Verified on 40 synthetic results where views follow Hook: learned Hook 1.95×, Flow 1.05×,
+  Value 0.43×, Trend 0.56×; correlation 0.49 → 0.75; flagged dead air as hurting.
 
 ## Housekeeping found along the way
 - NVIDIA driver too old for NVENC (needs 610+): CPU encode works, GPU would be ~5× faster.

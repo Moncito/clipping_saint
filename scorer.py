@@ -261,6 +261,8 @@ def score_clips(job, clips, picker="", ai="auto", ollama_model="qwen3:1.7b", con
             except Exception as e:
                 log(f"score: {t} judge failed ({str(e)[:200]})")
 
+    import learn
+    weights = learn.load_weights()
     for c in clips:
         sg, aj = c.pop("_sigscore"), judged.get(c["_n"])
         if aj:
@@ -268,7 +270,10 @@ def score_clips(job, clips, picker="", ai="auto", ollama_model="qwen3:1.7b", con
         else:
             parts = dict(sg)
         total = int(round(_clamp(sum(parts.values()), 1, 99)))
-        c["score"] = {"total": total, **parts, "by": by if aj else "signals", "signals": c.pop("_sig"),
+        raw = total
+        if weights:  # phase 4: weights learned from your real views (learn.py)
+            total = learn.calibrated_total(parts, weights)
+        c["score"] = {"total": total, "raw_total": raw, "tuned": bool(weights), **parts, "by": by if aj else "signals", "signals": c.pop("_sig"),
                       "why": (aj or {}).get("why", ""), "fix": (aj or {}).get("fix", ""),
                       "ai_title": (aj or {}).get("title", ""),
                       "post": post_captions((aj or {}).get("post"), c.get("title") or (aj or {}).get("title", ""),
@@ -361,7 +366,7 @@ def write_report(job, hl):
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,Segoe UI,sans-serif}}
 header{{padding:24px 16px 8px;max-width:1200px;margin:auto}}h1{{margin:0;font-size:22px}}
 header p{{margin:4px 0 0;color:var(--mut)}}
-main{{max-width:1200px;margin:auto;padding:16px;display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(340px,1fr))}}
+main{{max-width:1200px;margin:auto;padding:16px;display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr))}}
 .card{{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex}}
 video{{width:42%;aspect-ratio:9/16;background:#000;object-fit:cover}}
 .body{{padding:12px;flex:1;min-width:0}}.top{{display:flex;gap:10px;align-items:center}}
@@ -381,7 +386,8 @@ video{{width:42%;aspect-ratio:9/16;background:#000;object-fit:cover}}
 </style></head><body>
 <header><h1>{html.escape(job.name)} — clips ranked</h1>
 <p>Score 0-99 = Hook + Flow + Value + Trend. Scored by {html.escape(hl.get('scored_by', 'signals'))}.
-A sorting aid, not a view prediction. Watch before posting.</p></header>
+{'Weights tuned to your real views (see results.html). ' if any(c.get('score', {}).get('tuned') for c in hl['clips']) else ''}A sorting aid, not a view prediction. Watch before posting.
+After posting, log each clip's views/likes in the app's Results tab so the score learns your audience.</p></header>
 <main>{''.join(cards)}</main>
 <script>
 function cp(b){{const t=b.nextElementSibling.textContent;const done=()=>{{b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1200)}};
