@@ -680,7 +680,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 CAPTION_POP_WORDS = ["no way", "what", "omg", "insane", "crazy", "clutch", "holy", "bro", "wow", "grabe", "hala"]
 
 
-def write_ass(path, words, title, clip_len, preset):
+def parse_story(spec):
+    """'0-4: first line | 4-11: second line' (seconds or m:ss, relative to the clip) -> [(s, e, text)]"""
+    out = []
+    for part in (spec or "").split("|"):
+        m = re.match(r"^\s*([\d:.]+)\s*-\s*([\d:.]+)\s*:\s*(.+?)\s*$", part)
+        if m:
+            out.append((to_sec(m.group(1)), to_sec(m.group(2)), m.group(3)))
+        elif part.strip():
+            sys.exit(f"bad --story part (use 'start-end: text'): {part.strip()}")
+    return out
+
+
+def write_ass(path, words, title, clip_len, preset, story=None, brand=""):
     cap_y = int(preset.get("caption_margin_v", 620))  # distance from bottom
     head = f"""[Script Info]
 ScriptType: v4.00+
@@ -692,13 +704,28 @@ WrapStyle: 0
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Cap,Arial,92,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,7,3,2,60,60,{cap_y},1
 Style: Hook,Arial,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&HC0000000,-1,0,0,0,100,100,0,0,3,18,0,8,70,70,170,1
+Style: Story,Arial,62,&H00FFFFFF,&H00FFFFFF,&H00000000,&HC0000000,-1,0,0,0,100,100,0,0,3,18,0,8,80,80,190,1
+Style: Brand,Arial,58,&H0000C8FF,&H0000C8FF,&H00000000,&HE0000000,-1,0,0,0,100,100,4,0,3,14,0,8,60,60,60,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = []
-    if title:
+    if brand:  # campaign branding that must stay visible the whole clip
+        lines.append(f"Dialogue: 2,{ass_time(0)},{ass_time(clip_len + 1)},Brand,,0,0,0,,{ass_escape(brand.upper())}")
+    for a, b, text in story or []:  # timed story / fact lines (replace the single title hook)
+        lines.append(f"Dialogue: 1,{ass_time(a)},{ass_time(min(b, clip_len + 1))},Story,,0,0,0,,"
+                     "{\\fad(150,150)}" + ass_escape(text))
+    if title and not story:
         lines.append(f"Dialogue: 1,{ass_time(0)},{ass_time(min(3.0, clip_len))},Hook,,0,0,0,,{ass_escape(title.upper())}")
+    # glue fragments like ",400" (from "6,400") or "'s" back onto the word before them
+    merged = []
+    for w in words:
+        if merged and re.match(r"^[,.'’%]\w", w["w"].strip()):
+            merged[-1] = {**merged[-1], "w": merged[-1]["w"] + w["w"].strip(), "e": w["e"]}
+        else:
+            merged.append(dict(w))
+    words = merged
     # chunks of up to 3 words; current word highlighted yellow
     chunks, cur = [], []
     for w in words:
@@ -751,7 +778,7 @@ def stage_render(job, args, force):
 
     all_words = [w for s in segs for w in s.get("words", [])]
     z = None
-    use_cuts = bool(not args.text and not args.no_jump_cuts and all_words)
+    use_cuts = bool(not args.text and not args.no_jump_cuts and not args.keep_audio and all_words)
     use_zoom = bool(not args.text and not args.no_zoom)
     if (use_cuts or use_zoom) and (job / "audio.wav").exists():
         import scorer
@@ -802,7 +829,8 @@ def stage_render(job, args, force):
             else:
                 graph += f";[{bl}]subtitles={ass.name}[v]"
         else:
-            write_ass(ass, words if not args.no_captions else [], "" if args.no_hook else c.get("title", ""), out_len, preset)
+            write_ass(ass, words if not args.no_captions else [], "" if args.no_hook else c.get("title", ""), out_len, preset,
+                      story=parse_story(args.story), brand=args.brand)
             graph += f";[{bl}]subtitles={ass.name}[v]"
         base = ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{s:.2f}", "-t", f"{e - s:.2f}", "-i", str(src),
                 "-filter_complex", graph, "-map", "[v]", "-map", amap, "-r", "30"]
@@ -824,7 +852,7 @@ def stage_render(job, args, force):
         log(f"render: {mp4.name}  ({out_len:.0f}s{cut}{zm})  {c.get('title', '')}")
         c["out_len"] = round(out_len, 2)
         c["_words_rendered"] = words  # for version B's teaser (dropped before saving)
-    if not args.text and args.variants > 0:
+    if not args.text and not args.keep_audio and args.variants > 0:
         render_variants(job, hl, z, args, encoder)
     for c in hl["clips"]:
         c.pop("_words_rendered", None)
@@ -953,6 +981,8 @@ def cmd_run(args):
            "score": lambda f: stage_score(job, args, f)}
     if args.clips:  # manual times given: no transcription or AI picking needed
         stage_download(job, args.source, start == 0)
+        if not args.text and not args.no_captions:  # story / caption mode needs the words
+            stage_transcribe(job, args, False)
         manual = parse_manual_clips(args.clips)
         if args.text:  # campaign: the approved line doubles as the clip's title / caption base
             for c in manual:
@@ -1047,6 +1077,11 @@ def main():
     r.add_argument("--no-zoom", action="store_true", help="no punch-in zooms on loud / hype moments")
     r.add_argument("--variants", type=int, default=2,
                    help="also render a 'payoff first' version B of the N best clips (0 = off)")
+    r.add_argument("--keep-audio", action="store_true",
+                   help="campaign rule 'original music unchanged': no jump cuts, no version B (trimming only)")
+    r.add_argument("--brand", default="", help="brand tag shown the whole clip, e.g. \"MOVIETONE NEWS\"")
+    r.add_argument("--story", default="",
+                   help="timed on-screen lines replacing the title hook: \"0-4: line one | 4-11: line two\"")
     r.add_argument("--hashtags", default="", help="hashtags every post caption must include, e.g. \"#lany\"")
     r.set_defaults(func=cmd_run)
 

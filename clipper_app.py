@@ -255,6 +255,9 @@ class App(tk.Tk):
         self.cp_cover = tk.StringVar(value=s.get("cover", ""))
         self.cp_cpu = tk.BooleanVar(value=s.get("cpu", True))
         self.cp_tags = tk.StringVar(value=s.get("tags", ""))
+        self.cp_brand = tk.StringVar(value=s.get("brand", ""))
+        self.cp_story = tk.StringVar(value=s.get("story", ""))
+        self.cp_keep_audio = tk.BooleanVar(value=s.get("keep_audio", True))
 
         self.source_row(t, 0, self.cp_src)
         self.row(t, 1, "Job name", ttk.Entry(t, textvariable=self.cp_name), "e.g. lany-vid2")
@@ -281,6 +284,11 @@ class App(tk.Tk):
                  "center = full frame for vertical videos")
         self.row(t, 8, "", ttk.Checkbutton(t, text="CPU encode", variable=self.cp_cpu))
         self.row(t, 10, "Hashtags", ttk.Entry(t, textvariable=self.cp_tags), "required tags from the brief, e.g. #lany")
+        self.row(t, 11, "Story lines", ttk.Entry(t, textvariable=self.cp_story),
+                 "instead of one line: 0-6: first fact | 6-13: second fact")
+        self.row(t, 12, "Brand tag", ttk.Entry(t, textvariable=self.cp_brand), "shown all clip, e.g. MOVIETONE NEWS")
+        self.row(t, 13, "", ttk.Checkbutton(t, text="Keep original audio/music unchanged (no cuts, no version B)",
+                                             variable=self.cp_keep_audio))
         ttk.Label(t, foreground="#a05000",
                   text="After it renders, open clips\\clip_NN_preview.png and the video itself: "
                        "NO original text may show anywhere, or the clip is not paid.").grid(
@@ -469,10 +477,11 @@ class App(tk.Tk):
             raise ValueError("Pick the campaign video file.")
         if not times:
             raise ValueError("Enter clip times, e.g. 0:20-0:38")
-        if not text:
-            raise ValueError("Enter the approved on-screen text.")
+        story = self.cp_story.get().strip()
+        if not text and not story:
+            raise ValueError("Enter the approved on-screen text, or story lines (story mode).")
         approved = [l.strip() for l in self.cp_lines.get("1.0", "end").splitlines() if l.strip()]
-        if approved and text not in approved:
+        if text and approved and text not in approved:
             if not messagebox.askyesno("Clipper", "The on-screen text doesn't exactly match any approved line "
                                                   "you pasted. Clips with unapproved text don't get paid.\n\n"
                                                   "Render anyway?"):
@@ -483,8 +492,16 @@ class App(tk.Tk):
                 if not messagebox.askyesno("Clipper", f"{part.strip()} is under 8 seconds (most briefs need 8s+). "
                                                       "Render anyway?"):
                     raise ValueError("Cancelled.")
-        cmd = ["run", src, "--clips", times, "--text", text, "--preset", self.cp_preset.get(),
+        cmd = ["run", src, "--clips", times, "--preset", self.cp_preset.get(),
                "--box-color", self.cp_box.get(), "--from", "render"]
+        if text:   # one fixed approved line (LANY-style briefs)
+            cmd += ["--text", text]
+        else:      # story mode: narration captions + timed story lines (Movietone-style briefs)
+            cmd += ["--story", story]
+        if self.cp_brand.get().strip():
+            cmd += ["--brand", self.cp_brand.get().strip()]
+        if self.cp_keep_audio.get():
+            cmd.append("--keep-audio")
         if self.cp_name.get().strip():
             cmd += ["--name", self.cp_name.get().strip()]
         if self.cp_use_cover.get():
@@ -606,7 +623,8 @@ class App(tk.Tk):
                                   text=self.cp_text.get(), preset=self.cp_preset.get(), box=self.cp_box.get(),
                                   use_cover=self.cp_use_cover.get(), cover=self.cp_cover.get(),
                                   cpu=self.cp_cpu.get(), lines=self.cp_lines.get("1.0", "end").strip(),
-                                  tags=self.cp_tags.get())
+                                  tags=self.cp_tags.get(), brand=self.cp_brand.get(), story=self.cp_story.get(),
+                                  keep_audio=self.cp_keep_audio.get())
         save_settings(self.s)
 
     def on_close(self):
