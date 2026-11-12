@@ -29,11 +29,14 @@
 - `jobs/<name>/report.html`: clips ranked best→worst, playable, score badge, 4 bars,
   why/fix notes. App gets an **Open report** button and opens it after each run.
 
-### Phase 2 — Better clips, not just better ranking
-- Over-generate: score ~2-3× more candidates than `--count`, render only the top ones.
-- Smart trim: snap start/end to sentence boundaries; cut silences > 0.8s (jump cuts).
-- Hook boost: if the strongest line is mid-clip, flash it as the opening title.
-- Animated captions: 2-3 words at a time, active word highlighted, keyword color pop.
+### Phase 2 — Better clips, not just better ranking  ✅ built
+- Smart pick: the picker finds 2× `--count` clips (`--pool`), they're pre-scored on transcript +
+  audio (no render needed), only the best `--count` get rendered. Overlapping picks are dropped.
+- Sentence snapping: clips start at the start of a sentence and end after one finishes.
+- Jump cuts: pauses > 1s with no speech AND quiet audio are cut (loud gameplay is kept);
+  captions are re-timed to the cut. `--no-jump-cuts` to turn off. Not used in campaign mode.
+- Captions: chunks break on punctuation, active word pops (scale) and turns green on hype words.
+- Still open: hook boost (flash the strongest line as the opener).
 
 ### Phase 3 — Reframe + polish
 - Face tracking reframe (MediaPipe on CPU, fits the 4 GB GPU limit) for non-facecam videos.

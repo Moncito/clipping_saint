@@ -206,6 +206,8 @@ class App(tk.Tk):
         self.st_from = tk.StringVar(value="(normal)")
         self.st_cpu = tk.BooleanVar(value=s.get("cpu", True))
         self.st_nocap = tk.BooleanVar(value=s.get("nocap", False))
+        self.st_smart = tk.BooleanVar(value=s.get("smart", True))
+        self.st_cuts = tk.BooleanVar(value=s.get("cuts", True))
 
         self.source_row(t, 0, self.st_src)
         self.row(t, 1, "Job name", ttk.Entry(t, textvariable=self.st_name), "optional, reuse it to rerun the same video")
@@ -223,6 +225,10 @@ class App(tk.Tk):
         ttk.Checkbutton(opts, text="CPU encode (your GPU driver is too old for NVENC)", variable=self.st_cpu).pack(side="left")
         ttk.Checkbutton(opts, text="No captions", variable=self.st_nocap).pack(side="left", padx=12)
         self.row(t, 8, "", opts)
+        smart = ttk.Frame(t)
+        ttk.Checkbutton(smart, text="Smart pick (find 2x, keep the best scored)", variable=self.st_smart).pack(side="left")
+        ttk.Checkbutton(smart, text="Cut quiet pauses", variable=self.st_cuts).pack(side="left", padx=12)
+        self.row(t, 9, "", smart)
 
     # ------------------------------------------------------------ campaign tab
     def build_campaign(self):
@@ -330,6 +336,10 @@ class App(tk.Tk):
                 cmd.append("--cpu-encode")
             if self.st_nocap.get():
                 cmd.append("--no-captions")
+            if not self.st_smart.get():
+                cmd += ["--pool", "1"]
+            if not self.st_cuts.get():
+                cmd.append("--no-jump-cuts")
             return cmd
         src = self.cp_src.get().strip()
         times = self.cp_times.get().strip()
@@ -466,7 +476,8 @@ class App(tk.Tk):
         self.s["stream"] = dict(src=self.st_src.get(), name=self.st_name.get(), preset=self.st_preset.get(),
                                 count=self.st_count.get(), picker=self.st_picker.get(),
                                 whisper=self.st_whisper.get(), lang=self.st_lang.get(),
-                                cpu=self.st_cpu.get(), nocap=self.st_nocap.get())
+                                cpu=self.st_cpu.get(), nocap=self.st_nocap.get(),
+                                smart=self.st_smart.get(), cuts=self.st_cuts.get())
         self.s["campaign"] = dict(src=self.cp_src.get(), name=self.cp_name.get(), times=self.cp_times.get(),
                                   text=self.cp_text.get(), preset=self.cp_preset.get(), box=self.cp_box.get(),
                                   use_cover=self.cp_use_cover.get(), cover=self.cp_cover.get(),

@@ -184,13 +184,10 @@ def parse_judge(text):
 
 
 # ------------------------------------------------------------------ main entry
-def score_job(job, ai="auto", ollama_model="qwen3:1.7b", context=None, log=print):
+def score_clips(job, clips, picker="", ai="auto", ollama_model="qwen3:1.7b", context=None, log=print):
+    """Adds clip["score"] to every clip (in place). Works before rendering: only needs audio + transcript.
+    Returns who judged ('claude', 'ollama:<model>' or 'signals')."""
     job = Path(job)
-    hl = json.loads((job / "highlights.json").read_text(encoding="utf-8"))
-    clips = hl.get("clips", [])
-    if not clips:
-        log("score: no clips")
-        return
     tr = job / "transcript.json"
     segs = json.loads(tr.read_text(encoding="utf-8"))["segments"] if tr.exists() else []
     words = [w for s in segs for w in s.get("words", [])]
@@ -210,7 +207,7 @@ def score_job(job, ai="auto", ollama_model="qwen3:1.7b", context=None, log=print
 
     if context is None:
         context = ("clips cut from a long stream / video; audience: Tier 1-2 countries incl. South East Asia"
-                   if hl.get("picker") != "manual" else
+                   if picker != "manual" else
                    "campaign clips of provided footage (often live music) with one fixed on-screen text line")
     judged, by = {}, "signals"
     if ai != "none":
@@ -239,8 +236,21 @@ def score_job(job, ai="auto", ollama_model="qwen3:1.7b", context=None, log=print
                       "why": (aj or {}).get("why", ""), "fix": (aj or {}).get("fix", ""),
                       "ai_title": (aj or {}).get("title", "")}
         c.pop("_n"), c.pop("_text")
-    hl["scored_by"] = by
-    (job / "highlights.json").write_text(json.dumps(hl, indent=2, ensure_ascii=False), encoding="utf-8")
+    return by
+
+
+def score_job(job, ai="auto", ollama_model="qwen3:1.7b", context=None, log=print, rescore=True):
+    """Score the clips in highlights.json (unless already scored and rescore=False), save, write report."""
+    job = Path(job)
+    hl = json.loads((job / "highlights.json").read_text(encoding="utf-8"))
+    clips = hl.get("clips", [])
+    if not clips:
+        log("score: no clips")
+        return
+    if rescore or not all("score" in c for c in clips):
+        hl["scored_by"] = score_clips(job, clips, hl.get("picker", ""), ai, ollama_model, context, log)
+        (job / "highlights.json").write_text(json.dumps(hl, indent=2, ensure_ascii=False), encoding="utf-8")
+    by = hl.get("scored_by", "signals")
     write_report(job, hl)
     ranked = sorted(enumerate(clips, 1), key=lambda t: -t[1]["score"]["total"])
     log(f"score: ranked by {by} (best first)")
