@@ -8,8 +8,9 @@ Pipeline (each stage saves its output in jobs/<name>/, so you can rerun from any
   candidates -> candidates.json     (loudness spikes + hype keywords -> moments worth a look)
   pick       -> highlights.json     (picks ~2x the clips asked for, snaps them to sentences, pre-scores them,
                                      keeps the best --count)
-  render     -> clips/*.mp4         (9:16 crop by preset, jump cuts over quiet pauses, animated word captions)
-  score      -> report.html         (virality score 0-99: hook/flow/value/trend, clips ranked best first)
+  render     -> clips/*.mp4         (9:16 by preset - 'track' follows faces -, jump cuts, animated captions)
+  score      -> report.html         (virality score 0-99: hook/flow/value/trend, clips ranked best first,
+                                     plus ready-to-paste TikTok / Reels / Shorts captions per clip)
 
 Usage:
   python clip.py run <url-or-file> [--preset blur] [--count 8] [--picker auto]
@@ -495,7 +496,8 @@ def stage_pick(job, args, force):
         import scorer
         log(f"pick: pre-scoring {len(clips)} picks to keep the best {args.count}")
         try:
-            scored_by = scorer.score_clips(job, clips, used, args.judge, args.ollama_model, log=log)
+            scored_by = scorer.score_clips(job, clips, used, args.judge, args.ollama_model, log=log,
+                                           hashtags=args.hashtags)
             ranked = sorted(clips, key=lambda c: -c["score"]["total"])
             for c in ranked[args.count:]:
                 log(f"pick: dropped {fmt_t(c['start'])}-{fmt_t(c['end'])} (score {c['score']['total']})")
@@ -516,8 +518,12 @@ def stage_pick(job, args, force):
 W, H = 1080, 1920
 
 
-def video_filter(preset):
+def video_filter(preset, track=None):
     layout = preset.get("layout", "blur")
+    if layout == "track" and track:  # follow the main face (see reframe.py)
+        import reframe
+        return (f"[0:v]crop=ih*9/16:ih:{reframe.crop_x_expr(track)}:0,"
+                f"scale={W}:{H},setsar=1[base]")
     if layout == "center":
         x = preset.get("x", 0.5)  # horizontal focus 0..1
         return f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)*{x}:0,scale={W}:{H},setsar=1[base]"
@@ -670,10 +676,18 @@ def stage_render(job, args, force):
         s, e = c["start"], c["end"]
         words = [{"w": w["w"], "s": w["s"] - s, "e": w["e"] - s} for w in all_words if w["s"] >= s and w["e"] <= e]
         ass = outdir / f"{name}.ass"
-        graph = video_filter(preset)
         amap, out_len = "0:a?", e - s
         keeps, removed = (quiet_cuts(s, e, all_words, z) if use_cuts else ([], 0.0))
-        if removed >= 0.5 and len(keeps) > 1:
+        cutting = removed >= 0.5 and len(keeps) > 1
+        track = None
+        if preset.get("layout") == "track":
+            import reframe
+            track = reframe.face_track(src, s, e, log=log)
+            if track and cutting:
+                track = [(round(remap_time(tk, keeps), 2), x) for tk, x in track]
+            c["reframe"] = "face" if track else "blur (no face)"
+        graph = video_filter(preset, track)
+        if cutting:
             expr = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in keeps)
             graph = (f"[0:v]select='{expr}',setpts=N/FRAME_RATE/TB[vcut];"
                      f"[0:a]aselect='{expr}',asetpts=N/SR/TB[acut];" + graph.replace("[0:v]", "[vcut]", 1))
@@ -720,7 +734,7 @@ def stage_score(job, args, force):
         return
     import scorer
     try:
-        scorer.score_job(job, ai=args.judge, ollama_model=args.ollama_model, log=log,
+        scorer.score_job(job, ai=args.judge, ollama_model=args.ollama_model, log=log, hashtags=args.hashtags,
                          rescore=force and args.from_stage == "score")  # reuse pick-stage scores
     except Exception as e:  # scoring is a bonus; never lose the rendered clips over it
         log(f"score: failed ({e})")
@@ -761,7 +775,11 @@ def cmd_run(args):
            "score": lambda f: stage_score(job, args, f)}
     if args.clips:  # manual times given: no transcription or AI picking needed
         stage_download(job, args.source, start == 0)
-        save_json(job / "highlights.json", {"picker": "manual", "clips": parse_manual_clips(args.clips)})
+        manual = parse_manual_clips(args.clips)
+        if args.text:  # campaign: the approved line doubles as the clip's title / caption base
+            for c in manual:
+                c["title"] = args.text
+        save_json(job / "highlights.json", {"picker": "manual", "clips": manual})
         stage_render(job, args, True)
         stage_score(job, args, True)
         return
@@ -814,6 +832,7 @@ def main():
     r.add_argument("--pool", type=float, default=2.0,
                    help="pick this many times --count, pre-score them, keep the best --count (1 = off)")
     r.add_argument("--no-jump-cuts", action="store_true", help="keep quiet pauses instead of cutting them out")
+    r.add_argument("--hashtags", default="", help="hashtags every post caption must include, e.g. \"#lany\"")
     r.set_defaults(func=cmd_run)
 
     f = sub.add_parser("frame", help="save a still frame (to set up a facecam preset)")

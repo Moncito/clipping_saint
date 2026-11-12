@@ -208,6 +208,7 @@ class App(tk.Tk):
         self.st_nocap = tk.BooleanVar(value=s.get("nocap", False))
         self.st_smart = tk.BooleanVar(value=s.get("smart", True))
         self.st_cuts = tk.BooleanVar(value=s.get("cuts", True))
+        self.st_tags = tk.StringVar(value=s.get("tags", ""))
 
         self.source_row(t, 0, self.st_src)
         self.row(t, 1, "Job name", ttk.Entry(t, textvariable=self.st_name), "optional, reuse it to rerun the same video")
@@ -229,6 +230,9 @@ class App(tk.Tk):
         ttk.Checkbutton(smart, text="Smart pick (find 2x, keep the best scored)", variable=self.st_smart).pack(side="left")
         ttk.Checkbutton(smart, text="Cut quiet pauses", variable=self.st_cuts).pack(side="left", padx=12)
         self.row(t, 9, "", smart)
+        self.row(t, 10, "Hashtags", ttk.Entry(t, textvariable=self.st_tags), "always added to post captions")
+        ttk.Label(t, foreground="#777", text="Tip: preset 'track' follows faces in 16:9 videos (auto-reframe).").grid(
+            row=11, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     # ------------------------------------------------------------ campaign tab
     def build_campaign(self):
@@ -242,6 +246,7 @@ class App(tk.Tk):
         self.cp_use_cover = tk.BooleanVar(value=s.get("use_cover", False))
         self.cp_cover = tk.StringVar(value=s.get("cover", ""))
         self.cp_cpu = tk.BooleanVar(value=s.get("cpu", True))
+        self.cp_tags = tk.StringVar(value=s.get("tags", ""))
 
         self.source_row(t, 0, self.cp_src)
         self.row(t, 1, "Job name", ttk.Entry(t, textvariable=self.cp_name), "e.g. lany-vid2")
@@ -267,6 +272,7 @@ class App(tk.Tk):
         self.row(t, 7, "Layout preset", ttk.Combobox(t, textvariable=self.cp_preset, values=presets(), state="readonly"),
                  "center = full frame for vertical videos")
         self.row(t, 8, "", ttk.Checkbutton(t, text="CPU encode", variable=self.cp_cpu))
+        self.row(t, 10, "Hashtags", ttk.Entry(t, textvariable=self.cp_tags), "required tags from the brief, e.g. #lany")
         ttk.Label(t, foreground="#a05000",
                   text="After it renders, open clips\\clip_NN_preview.png and the video itself: "
                        "NO original text may show anywhere, or the clip is not paid.").grid(
@@ -340,6 +346,8 @@ class App(tk.Tk):
                 cmd += ["--pool", "1"]
             if not self.st_cuts.get():
                 cmd.append("--no-jump-cuts")
+            if self.st_tags.get().strip():
+                cmd += ["--hashtags", self.st_tags.get().strip()]
             return cmd
         src = self.cp_src.get().strip()
         times = self.cp_times.get().strip()
@@ -372,6 +380,8 @@ class App(tk.Tk):
             cmd += ["--cover", self.cp_cover.get().replace(" ", "")]
         if self.cp_cpu.get():
             cmd.append("--cpu-encode")
+        if self.cp_tags.get().strip():
+            cmd += ["--hashtags", self.cp_tags.get().strip()]
         return cmd
 
     def start_run(self):
@@ -477,11 +487,13 @@ class App(tk.Tk):
                                 count=self.st_count.get(), picker=self.st_picker.get(),
                                 whisper=self.st_whisper.get(), lang=self.st_lang.get(),
                                 cpu=self.st_cpu.get(), nocap=self.st_nocap.get(),
-                                smart=self.st_smart.get(), cuts=self.st_cuts.get())
+                                smart=self.st_smart.get(), cuts=self.st_cuts.get(),
+                                tags=self.st_tags.get())
         self.s["campaign"] = dict(src=self.cp_src.get(), name=self.cp_name.get(), times=self.cp_times.get(),
                                   text=self.cp_text.get(), preset=self.cp_preset.get(), box=self.cp_box.get(),
                                   use_cover=self.cp_use_cover.get(), cover=self.cp_cover.get(),
-                                  cpu=self.cp_cpu.get(), lines=self.cp_lines.get("1.0", "end").strip())
+                                  cpu=self.cp_cpu.get(), lines=self.cp_lines.get("1.0", "end").strip(),
+                                  tags=self.cp_tags.get())
         save_settings(self.s)
 
     def on_close(self):
