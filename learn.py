@@ -42,14 +42,24 @@ def read_rows(path=PERF):
         return list(csv.DictReader(f))
 
 
+def clip_id(clip):
+    """3 / '3' / 'clip_03' -> '3';  '3b' / 'clip_03_b' -> '3b' (version B, payoff first)."""
+    s = str(clip).lower().replace("clip_", "").replace("_", "").replace(".mp4", "").strip()
+    num = "".join(ch for ch in s if ch.isdigit())
+    if not num:
+        raise ValueError(f"bad clip number: {clip}")
+    return f"{int(num)}{'b' if s.endswith('b') else ''}"
+
+
 def add_result(job, clip, platform, views, likes=0, comments=0, shares=0, url="", path=PERF):
     """Add or update (same job + clip + platform) one posted clip's numbers."""
+    clip = clip_id(clip)
     platform = platform.lower().replace("instagram", "reels").replace("youtube", "shorts")
     if platform not in ENGAGEMENT_MIN:
         raise ValueError("platform must be tiktok, reels or shorts")
     rows = [r for r in read_rows(path)
-            if not (r["job"] == job and int(r["clip"]) == int(clip) and r["platform"] == platform)]
-    rows.append({"date": date.today().isoformat(), "job": job, "clip": int(clip), "platform": platform,
+            if not (r["job"] == job and clip_id(r["clip"]) == clip and r["platform"] == platform)]
+    rows.append({"date": date.today().isoformat(), "job": job, "clip": clip, "platform": platform,
                  "views": int(views), "likes": int(likes), "comments": int(comments), "shares": int(shares),
                  "url": url})
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -68,13 +78,15 @@ def joined(rows, jobs_dir=JOBS):
             p = Path(jobs_dir) / r["job"] / "highlights.json"
             cache[r["job"]] = json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
         hl = cache[r["job"]]
-        n = int(r["clip"])
+        cid = clip_id(r["clip"])
+        n = int(cid.rstrip("b"))
         if not hl or not (1 <= n <= len(hl["clips"])) or "score" not in hl["clips"][n - 1]:
             continue
         c = hl["clips"][n - 1]
         views = int(r["views"])
         eng = (int(r["likes"]) + int(r["comments"]) + int(r["shares"])) / views if views else 0.0
-        out.append({**r, "views": views, "eng": eng, "title": c.get("title", ""), "score": c["score"]})
+        out.append({**r, "clip": cid, "variant": "B" if cid.endswith("b") else "A", "views": views, "eng": eng,
+                    "title": c.get("title", ""), "score": c["score"]})
     return out
 
 
@@ -183,6 +195,14 @@ def learn(perf=PERF, jobs_dir=JOBS, calib=CALIB, results=RESULTS, log=print):
             if r is not None:
                 insights.append((s, round(r, 2), len(pairs)))
     info["signals"] = insights
+
+    # A/B: same clip + platform posted as normal (A) and payoff-first (B)
+    pairs = {}
+    for d in data:
+        pairs.setdefault((d["job"], d["clip"].rstrip("b"), d["platform"]), {})[d["variant"]] = d["views"]
+    ratios = [math.log10((v["B"] + 1) / (v["A"] + 1)) for v in pairs.values() if "A" in v and "B" in v]
+    if ratios:
+        info["ab"] = {"pairs": len(ratios), "b_vs_a_pct": round((10 ** (sum(ratios) / len(ratios)) - 1) * 100)}
     calib = Path(calib)
     calib.write_text(json.dumps(info, indent=2), encoding="utf-8")
     write_results(data, info, results)
@@ -217,7 +237,7 @@ def write_results(data, info, path=RESULTS):
     for d in sorted(data, key=lambda d: -d["views"]):
         need = eng_min(d["platform"], d["views"])
         ok = d["eng"] >= need
-        rows.append(f"<tr><td>{html.escape(d['job'])} #{int(d['clip'])}<br><small>{html.escape(d['title'])}</small></td>"
+        rows.append(f"<tr><td>{html.escape(d['job'])} #{html.escape(str(d['clip']))}<br><small>{html.escape(d['title'])}</small></td>"
                     f"<td>{d['platform']}</td><td class=n>{d['score']['total']}</td><td class=n>{d['views']:,}</td>"
                     f"<td class='n {'ok' if ok else 'bad'}'>{d['eng'] * 100:.1f}%"
                     f"<br><small>min {need * 100:.1f}%</small></td></tr>")
@@ -233,6 +253,11 @@ def write_results(data, info, path=RESULTS):
             more = "more" if r > 0 else "less"
             tips.append(f"<li>Clips with <b>{more} {SIGNAL_NAMES.get(s, s)}</b> got more views "
                         f"(r = {r:+.2f}, {k} clips)</li>")
+    ab = info.get("ab")
+    if ab:
+        better = "more" if ab["b_vs_a_pct"] >= 0 else "fewer"
+        tips.insert(0, f"<li><b>Payoff-first (version B)</b> got {abs(ab['b_vs_a_pct'])}% {better} views than the "
+                       f"normal cut ({ab['pairs']} A/B pair{'s' if ab['pairs'] != 1 else ''})</li>")
     n = info.get("n", 0)
     status = (f"Learned from <b>{n}</b> posted clips (trust {info.get('trust', 0):.0%})." if n >= MIN_TO_CALIBRATE
               else f"<b>{n}</b> posted clip(s) logged. Scores start adapting at {MIN_TO_CALIBRATE}; "

@@ -61,6 +61,24 @@
 - Verified on 40 synthetic results where views follow Hook: learned Hook 1.95×, Flow 1.05×,
   Value 0.43×, Trend 0.56×; correlation 0.49 → 0.75; flagged dead air as hurting.
 
+### Phase 5 — Beat Opus Clip  ✅ built
+Why scores sat at ≤60: every score came from the tiny local model (constant numbers), the judge
+prompt told it to score harshly, dead air was measured before jump cuts removed it, openings were
+quieter than average and clips ran 39-50s.
+- **Diagnostics:** every run writes `jobs/<name>/run.log`; `clip.py test-ai` / app **Test AI** says
+  exactly why Claude or Ollama can't judge.
+- **Fair scoring:** Opus-style rubric anchors (17-20 per category = normal postable clip), signal
+  scores mapped onto the same scale, dead air = only *quiet* gaps, measured on the clip as cut.
+- **Hook-first starts:** the start slides (up to 8s) to the sentence with the strongest opening
+  (loudness + hype words + talking in the first 2-3s). Picker prompt asks for it too.
+- **Shorter clips:** `--target-len 35`; longer clips end at a sentence before target + 5s.
+- **Zoom punch-ins:** up to 4 quick zooms per clip on loud peaks / hype words (`--no-zoom`).
+- **Platform titles:** 3 options each for TikTok, Reels (hook line ≤60 chars) and Shorts
+  (searchable title ≤90 chars), best first, Copy buttons in the report, saved in `clip_NN_post.txt`.
+- **Claude sees the clip:** 3 frames per clip are given to Claude (Read tool) with the transcript.
+- **A/B versions:** the 2 best clips also get `clip_NN_b.mp4`, a "payoff first" cold open. Log both
+  (clip `3` and `3b`); the dashboard reports whether payoff-first wins for your audience.
+
 ## Housekeeping found along the way
 - NVIDIA driver too old for NVENC (needs 610+): CPU encode works, GPU would be ~5× faster.
 - Ollama default `qwen2.5:3b` isn't installed; installed: qwen3:1.7b, gemma3:1b.

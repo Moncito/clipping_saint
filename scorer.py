@@ -21,6 +21,9 @@ from pathlib import Path
 
 HYPE = ["no way", "let's go", "lets go", "oh my god", "omg", "what the", "bro", "dude", "haha", "insane",
         "crazy", "clutch", "wait", "oh no", "holy", "shit", "fuck", "grabe", "hala", "tangina", "yo"]
+FILLER_OPENERS = ["shout out", "shoutout", "subscribe", "sponsor", "link in", "link below", "welcome back",
+                  "what's up guys", "whats up guys", "today we", "in this video", "before we start",
+                  "like and subscribe", "hit the bell", "patreon"]
 CATS = ["hook", "flow", "value", "trend"]
 PLATFORMS = ["tiktok", "reels", "shorts"]
 PLATFORM_TAG = {"tiktok": "#fyp", "reels": "#reels", "shorts": "#shorts"}
@@ -33,6 +36,25 @@ def with_tags(text, required):
         if tag.lower() not in text.lower():
             text = f"{text} {tag}"
     return text.strip()
+
+
+def platform_titles(ai_titles, title):
+    """3 title options per platform (best first): the AI's, or templates when it gave nothing usable."""
+    base = (title or "wait for it").strip().rstrip(".")
+    low = base[0].lower() + base[1:] if base else base
+    templates = {"tiktok": [base, f"wait for it... {low}", f"POV: {low}"],
+                 "reels": [f"{base} \U0001F633", f"nobody expected this: {low}", f"watch till the end ({low})"],
+                 "shorts": [base, f"{base} (wait for it)", f"{base} \U0001F633 #shorts"]}
+    ai = {pf: [x for x in (ai_titles or {}).get(pf, []) if len(x) >= 6] for pf in PLATFORMS}
+    same = len({tuple(v) for v in ai.values()}) == 1   # weak model copied one list everywhere
+    out = {}
+    for pf in PLATFORMS:
+        got = ai[pf]
+        if len(set(got)) < 2 or (same and pf != "shorts"):
+            out[pf] = templates[pf]   # (identical AI lists suit Shorts best: keep them there only)
+        else:
+            out[pf] = got
+    return out
 
 
 def post_captions(ai_post, title, hashtags):
@@ -73,7 +95,7 @@ def loudness(wav_path, hop=0.25):
     return z, hop
 
 
-def clip_signals(s, e, words, segs, z, hop, has_transcript):
+def clip_signals(s, e, words, segs, z, hop, has_transcript, jump_cuts=False):
     import numpy as np
     L = e - s
     zc = z[int(s / hop): max(int(e / hop), int(s / hop) + 1)]
@@ -85,17 +107,32 @@ def clip_signals(s, e, words, segs, z, hop, has_transcript):
            "hook_energy": round(float(np.mean(z3)) if len(z3) else 0.0, 2)}
     if has_transcript:
         first3 = [w for w in w_in if w["s"] < s + 3]
+        open_txt = " ".join(w["w"] for w in first3).lower()
+        sig["filler_open"] = any(f in open_txt for f in FILLER_OPENERS)
         text5 = " ".join(w["w"] for w in w_in if w["s"] < s + 5).lower()
-        # dead air = sum of gaps between words longer than 1.2s (plus lead-in / tail)
+        # dead air = QUIET gaps with no words longer than 1.2s (loud gaps are action, not dead air).
+        # With jump cuts on, quiet gaps between words get cut in the render, so measure the clip as cut.
         times = [s] + [t for w in w_in for t in (w["s"], w["e"])] + [e]
-        gaps = sum(max(0.0, times[i + 1] - times[i]) for i in range(0, len(times) - 1, 2)
-                   if times[i + 1] - times[i] > 1.2)
+        gaps, removed = 0.0, 0.0
+        for i in range(0, len(times) - 1, 2):
+            a, b = times[i], times[i + 1]
+            if b - a <= 1.0:
+                continue
+            seg = z[int(a / hop): max(int(b / hop), int(a / hop) + 1)]
+            quiet = not len(seg) or float(np.mean(seg)) <= 0.3
+            inner = 0 < i < len(times) - 2
+            if jump_cuts and quiet and inner:
+                removed += (b - a) - 0.5
+            elif quiet and b - a > 1.2:
+                gaps += b - a
+        Lc = max(1.0, L - removed)
         last = w_in[-1] if w_in else None
+        sig["length"] = round(Lc, 1)
         sig.update({
             "words_first_3s": len(first3),
             "hype_first_5s": sum(text5.count(h) for h in HYPE),
-            "dead_air_pct": round(100 * _clamp(gaps / L if L else 1), 0),
-            "words_per_sec": round(len(w_in) / L, 2) if L else 0,
+            "dead_air_pct": round(100 * _clamp(gaps / Lc), 0),
+            "words_per_sec": round(len(w_in) / Lc, 2),
             "ends_clean": bool(last and re.search(r"[.!?…]$", last["w"].strip()) and e - last["e"] < 2.0),
             "starts_mid_word": any(w["s"] < s < w["e"] for w in words),
         })
@@ -115,6 +152,8 @@ def signal_scores(sig, has_transcript):
         wps = sig["words_per_sec"]
         pace = 1.0 if 1.8 <= wps <= 3.8 else _clamp(1 - abs(wps - 2.8) / 2.8)
         hook = 0.45 * max(talk_open, loud_open) + 0.35 * loud_open + 0.20 * hype
+        if sig.get("filler_open"):   # opens on an intro / sponsor line
+            hook *= 0.4
         flow = 0.45 * flow_air + 0.25 * float(sig["ends_clean"]) + 0.15 * float(not sig["starts_mid_word"]) \
             + 0.15 * length_fit
         value = 0.5 * energy + 0.5 * pace
@@ -122,7 +161,9 @@ def signal_scores(sig, has_transcript):
         hook = loud_open
         flow = 0.6 * length_fit + 0.4 * energy
         value = energy
-    trend = 0.5  # signals can't see trends; AI judge fills this in
+    # map 0..1 onto Opus-like 0.3..1.0 so an average, postable clip lands around 16-18 per category
+    hook, flow, value = (0.3 + 0.7 * v for v in (hook, flow, value))
+    trend = 0.65  # signals can't see trends; the AI judge fills this in
     return {k: round(25 * v, 1) for k, v in zip(CATS, [hook, flow, value, trend])}
 
 
@@ -130,7 +171,9 @@ def signal_scores(sig, has_transcript):
 JUDGE_PROMPT = """You are a strict short-form video editor rating clips for TikTok / Reels / Shorts, like Opus Clip's virality score.
 Context: {context}
 
-Rate EACH clip on 4 categories, 0-25 each (be harsh, most clips are 10-18, only great ones get 22+):
+Rate EACH clip on 4 categories, 0-25 each. Score on the same scale as Opus Clip (whose totals usually run 40-99):
+  23-25 exceptional, would go viral | 19-22 strong, clearly worth posting | 15-18 decent | 10-14 weak | under 10 broken.
+  A normal postable clip is about 17-20 per category. Use the whole range and don't give every clip the same number.
 - hook: do the first 3 seconds grab a stranger scrolling past?
 - flow: does it move logically and end on a satisfying beat (not mid-sentence)?
 - value: is it funny, emotional, surprising or useful enough to watch to the end / share?
@@ -143,7 +186,16 @@ Reply with ONLY this JSON:
 "why": "<one short line: the main reason for the score>",
 "title": "<better on-screen hook, max 7 words>",
 "fix": "<one concrete edit that would raise the score, e.g. start 3s later at 'X'>",
-"post": {{"tiktok": "<post caption>", "reels": "<post caption>", "shorts": "<post caption>"}}}}]}}
+"post": {{"tiktok": "<post caption>", "reels": "<post caption>", "shorts": "<post caption>"}},
+"titles": {{"tiktok": ["<best>", "<option 2>", "<option 3>"], "reels": ["...", "...", "..."],
+            "shorts": ["...", "...", "..."]}},
+"payoff": "<the exact words (5-10, copied from the transcript) of the most surprising / funny / emotional line>"}}]}}
+
+Titles (3 options per platform, best first; they must differ from each other):
+- tiktok / reels: the hook line shown on screen and as the caption's first line, max 60 characters,
+  curiosity or emotion ("he did NOT expect this", "POV: ..."), lowercase is fine
+- shorts: a YouTube Shorts title, max 90 characters, with 1-2 words people search for
+  (game / show / person name), still punchy; no clickbait lies
 
 Post captions (what goes under the video when posting, one per platform):
 - short (max ~120 characters before hashtags), same mood as the clip, may use 1-2 emoji
@@ -156,23 +208,28 @@ CLIPS:
 """
 
 
-def judge_prompt(clips, context, hashtags=""):
+def judge_prompt(clips, context, hashtags="", frames=None):
     parts = []
     for c in clips:
         sg = c["_sig"]
         meta = ", ".join(f"{k}={v}" for k, v in sg.items())
+        fr = ""
+        if frames and frames.get(c["_n"]):
+            fr = "\nframes (start / middle / end, open them with the Read tool): " + ", ".join(frames[c["_n"]])
         parts.append(f"[clip {c['_n']}] {c['end'] - c['start']:.0f}s, current title: {c.get('title') or '(none)'}\n"
-                     f"signals: {meta}\ntranscript: {c['_text'] or '(no speech: music / gameplay audio)'}")
+                     f"signals: {meta}\ntranscript: {c['_text'] or '(no speech: music / gameplay audio)'}{fr}")
     return JUDGE_PROMPT.format(context=context, hashtags=hashtags or "(none)", body="\n\n".join(parts))
 
 
-def ask_claude(prompt):
+def ask_claude(prompt, timeout=600, allow_read=False):
     exe = shutil.which("claude")
     if not exe:
-        raise RuntimeError("claude CLI not found")
-    out = subprocess.run([exe, "-p", "Follow the instructions in the input exactly and reply with JSON only."],
-                         input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                         timeout=600)
+        raise RuntimeError("claude CLI not found on PATH (is Claude Code installed? try 'claude --version')")
+    cmd = [exe, "-p", "Follow the instructions in the input exactly and reply with JSON only."]
+    if allow_read:  # lets Claude look at the clip frames we saved
+        cmd += ["--allowedTools", "Read"]
+    out = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                         timeout=timeout)
     if out.returncode != 0:
         raise RuntimeError((out.stderr.strip() or out.stdout.strip())[:300])
     return out.stdout
@@ -211,6 +268,10 @@ def parse_judge(text):
             out[n].update({k: str(c.get(k, ""))[:160] for k in ("why", "title", "fix")})
             post = c.get("post") if isinstance(c.get("post"), dict) else {}
             out[n]["post"] = {k: str(post.get(k, "")).strip()[:400] for k in PLATFORMS if post.get(k)}
+            out[n]["payoff"] = str(c.get("payoff", ""))[:160]
+            tt = c.get("titles") if isinstance(c.get("titles"), dict) else {}
+            out[n]["titles"] = {k: [str(x).strip()[:100] for x in tt.get(k, []) if str(x).strip()][:3]
+                                for k in PLATFORMS if isinstance(tt.get(k), list)}
         except (KeyError, TypeError, ValueError):
             continue
     if not out:
@@ -219,8 +280,27 @@ def parse_judge(text):
 
 
 # ------------------------------------------------------------------ main entry
+def clip_frames(job, clips):
+    """3 small frames per clip (start / middle / end) so Claude can SEE the clip, not only read it."""
+    src = json.loads((job / "job.json").read_text(encoding="utf-8"))["source"]
+    out_dir = job / "frames"
+    out_dir.mkdir(exist_ok=True)
+    frames = {}
+    for c in clips:
+        paths = []
+        for k, f in enumerate((0.12, 0.5, 0.88)):
+            ts = c["start"] + f * (c["end"] - c["start"])
+            pth = out_dir / f"c{c['_n']:02d}_{k}.jpg"
+            r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{ts:.2f}", "-i", src, "-frames:v", "1",
+                                "-vf", "scale=384:-2", "-q:v", "5", str(pth)], capture_output=True)
+            if r.returncode == 0 and pth.exists():
+                paths.append(str(pth.resolve()))
+        frames[c["_n"]] = paths
+    return frames
+
+
 def score_clips(job, clips, picker="", ai="auto", ollama_model="qwen3:1.7b", context=None, log=print,
-                hashtags=""):
+                hashtags="", jump_cuts=False):
     """Adds clip["score"] to every clip (in place). Works before rendering: only needs audio + transcript.
     Returns who judged ('claude', 'ollama:<model>' or 'signals')."""
     job = Path(job)
@@ -237,7 +317,7 @@ def score_clips(job, clips, picker="", ai="auto", ollama_model="qwen3:1.7b", con
 
     for n, c in enumerate(clips, 1):
         c["_n"] = n
-        c["_sig"] = clip_signals(c["start"], c["end"], words, segs, z, hop, has_tr)
+        c["_sig"] = clip_signals(c["start"], c["end"], words, segs, z, hop, has_tr, jump_cuts)
         c["_text"] = " ".join(w["w"] for w in words if c["start"] <= w["s"] <= c["end"])[:1200]
         c["_sigscore"] = signal_scores(c["_sig"], has_tr)
 
@@ -253,7 +333,12 @@ def score_clips(job, clips, picker="", ai="auto", ollama_model="qwen3:1.7b", con
         for t in tries:
             try:
                 if t == "claude":
-                    judged, by = parse_judge(ask_claude(prompt)), "claude"
+                    try:  # first try with frames, so Claude judges what it SEES too
+                        vprompt = judge_prompt(clips, context, hashtags, clip_frames(job, clips))
+                        judged, by = parse_judge(ask_claude(vprompt, allow_read=True)), "claude+frames"
+                    except Exception as e:
+                        log(f"score: claude with frames failed ({str(e)[:160]}), trying text only")
+                        judged, by = parse_judge(ask_claude(prompt)), "claude"
                 else:
                     reply, used = ask_ollama(prompt, ollama_model)
                     judged, by = parse_judge(reply), f"ollama:{used}"
@@ -277,12 +362,15 @@ def score_clips(job, clips, picker="", ai="auto", ollama_model="qwen3:1.7b", con
                       "why": (aj or {}).get("why", ""), "fix": (aj or {}).get("fix", ""),
                       "ai_title": (aj or {}).get("title", ""),
                       "post": post_captions((aj or {}).get("post"), c.get("title") or (aj or {}).get("title", ""),
-                                            hashtags)}
+                                            hashtags),
+                      "payoff": (aj or {}).get("payoff", ""),
+                      "titles": platform_titles((aj or {}).get("titles"), c.get("title") or (aj or {}).get("title", ""))}
         c.pop("_n"), c.pop("_text")
     return by
 
 
-def score_job(job, ai="auto", ollama_model="qwen3:1.7b", context=None, log=print, rescore=True, hashtags=""):
+def score_job(job, ai="auto", ollama_model="qwen3:1.7b", context=None, log=print, rescore=True, hashtags="",
+              jump_cuts=False):
     """Score the clips in highlights.json (unless already scored and rescore=False), save, write report."""
     job = Path(job)
     hl = json.loads((job / "highlights.json").read_text(encoding="utf-8"))
@@ -291,15 +379,19 @@ def score_job(job, ai="auto", ollama_model="qwen3:1.7b", context=None, log=print
         log("score: no clips")
         return
     if rescore or not all("score" in c for c in clips):
-        hl["scored_by"] = score_clips(job, clips, hl.get("picker", ""), ai, ollama_model, context, log, hashtags)
+        hl["scored_by"] = score_clips(job, clips, hl.get("picker", ""), ai, ollama_model, context, log, hashtags,
+                                      jump_cuts)
         (job / "highlights.json").write_text(json.dumps(hl, indent=2, ensure_ascii=False), encoding="utf-8")
     by = hl.get("scored_by", "signals")
     for n, c in enumerate(clips, 1):  # ready-to-paste post captions next to each clip
         post = c["score"].get("post") or post_captions(None, c.get("title"), hashtags)
         c["score"]["post"] = post
+        titles = c["score"].get("titles") or platform_titles(None, c.get("title"))
+        c["score"]["titles"] = titles
         if (job / "clips").exists():
             (job / "clips" / f"clip_{n:02d}_post.txt").write_text(
-                "\n\n".join(f"[{pf.upper()}]\n{post[pf]}" for pf in PLATFORMS) + "\n", encoding="utf-8")
+                "\n\n".join(f"[{pf.upper()}]\nTitle options: " + " | ".join(titles[pf]) + f"\nCaption: {post[pf]}"
+                             for pf in PLATFORMS) + "\n", encoding="utf-8")
     (job / "highlights.json").write_text(json.dumps(hl, indent=2, ensure_ascii=False), encoding="utf-8")
     write_report(job, hl)
     ranked = sorted(enumerate(clips, 1), key=lambda t: -t[1]["score"]["total"])
@@ -342,6 +434,16 @@ def write_report(job, hl):
             notes += f'<p><strong>Fix:</strong> {html.escape(sc["fix"])}</p>'
         if sc.get("ai_title") and sc["ai_title"] != c.get("title"):
             notes += f'<p><strong>Title idea:</strong> {html.escape(sc["ai_title"])}</p>'
+        if sc.get("titles"):
+            notes += '<div class="post titles">' + "".join(
+                f'<div><b>{pf.title()} title</b>' + "".join(
+                    f'<p class="opt{" best" if i == 0 else ""}"><button onclick="cp(this)">Copy</button>'
+                    f'<span>{html.escape(x)}</span></p>' for i, x in enumerate(sc["titles"].get(pf, []))) + "</div>"
+                for pf in PLATFORMS) + "</div>"
+        if c.get("variant_b"):
+            notes += (f'<details class="vb"><summary>Version B: payoff first (post both, log both)</summary>'
+                      f'<video src="clips/{html.escape(c["variant_b"]["file"])}" controls preload="none" playsinline>'
+                      f'</video></details>')
         if sc.get("post"):
             notes += '<div class="post">' + "".join(
                 f'<div><b>{pf.title()}</b><button onclick="cp(this)">Copy</button>'
@@ -378,7 +480,9 @@ video{{width:42%;aspect-ratio:9/16;background:#000;object-fit:cover}}
 .bar em{{font-style:normal;color:var(--mut);text-align:right}}
 .chips{{display:flex;flex-wrap:wrap;gap:4px;margin:10px 0 4px}}.chips span{{font-size:11px;padding:2px 7px;border:1px solid var(--line);border-radius:10px;color:var(--mut)}}
 .body p{{margin:6px 0 0;font-size:13px}}
-.post{{margin-top:8px;display:grid;gap:6px}}.post div{{border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-size:12px}}
+.post{{margin-top:8px;display:grid;gap:6px}}
+.opt{{margin:3px 0 0;font-size:12px}}.opt.best span{{font-weight:600}}.opt button{{margin-left:6px}}
+.vb{{margin-top:8px;font-size:13px}}.vb video{{width:100%;max-height:60vh;margin-top:6px}}.post div{{border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-size:12px}}
 .post b{{font-size:11px;color:var(--mut);text-transform:uppercase}}.post span{{display:block;margin-top:2px}}
 .post button{{float:right;font-size:11px;padding:1px 8px;border-radius:6px;border:1px solid var(--line);background:none;color:var(--fg);cursor:pointer}}
 @media (max-width:560px){{main{{grid-template-columns:1fr}}.card{{flex-direction:column}}
@@ -390,7 +494,7 @@ video{{width:42%;aspect-ratio:9/16;background:#000;object-fit:cover}}
 After posting, log each clip's views/likes in the app's Results tab so the score learns your audience.</p></header>
 <main>{''.join(cards)}</main>
 <script>
-function cp(b){{const t=b.nextElementSibling.textContent;const done=()=>{{b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1200)}};
+function cp(b){{const t=b.parentElement.querySelector('span').textContent;const done=()=>{{b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1200)}};
 try{{navigator.clipboard.writeText(t).then(done,()=>fb(t,done))}}catch(e){{fb(t,done)}}}}
 function fb(t,done){{const a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();
 try{{document.execCommand('copy');done()}}catch(e){{}}a.remove()}}

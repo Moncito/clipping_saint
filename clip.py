@@ -63,9 +63,23 @@ HYPE_WORDS = [
 ]
 
 
+FILLER_OPENERS = ["shout out", "shoutout", "subscribe", "sponsor", "link in", "link below", "welcome back",
+                  "what's up guys", "whats up guys", "today we", "in this video", "before we start",
+                  "like and subscribe", "hit the bell", "patreon"]
+
+
 # ----------------------------------------------------------------- helpers
+LOG_FILE = None  # set per job by cmd_run: every line also goes to jobs/<name>/run.log
+
+
 def log(msg):
     print(f"[clipper] {msg}", flush=True)
+    if LOG_FILE:
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"{msg}\n")
+        except OSError:
+            pass
 
 
 def run(cmd, **kw):
@@ -347,6 +361,68 @@ def quiet_cuts(s, e, words, z=None, hop=0.25, gap=1.0, pad=0.25):
     return keeps, removed
 
 
+def hook_start(s, e, spans, words, z, hop, min_len):
+    """Slide the start to the sentence (within the first 8s) with the strongest opening:
+    loud audio + hype words + someone talking in its first 2-3 seconds."""
+    def strength(t0):
+        seg = z[int(t0 / hop): int((t0 + 2) / hop) + 1] if z is not None else []
+        loud = float(seg.mean()) if len(seg) else 0.0
+        early = [w for w in words if t0 <= w["s"] < t0 + 3]
+        hype = sum(" ".join(w["w"] for w in early).lower().count(h) for h in HYPE_WORDS)
+        talk = min(len([w for w in early if w["s"] < t0 + 2]), 5) / 5
+        text = " ".join(w["w"] for w in early).lower()
+        filler = any(f in text for f in FILLER_OPENERS)   # intros / sponsor lines kill the hook
+        return loud + 0.8 * hype + 0.25 * talk - (1.5 if filler else 0.0)
+    best_t, best = s, strength(s)
+    for a, _ in spans:
+        if s < a <= s + 8 and e - a >= min_len:
+            v = strength(a)
+            if v > best + 0.25:
+                best_t, best = a, v
+    return round(max(0.0, best_t - 0.2), 2) if best_t != s else s
+
+
+def trim_to_target(s, e, spans, min_len, target):
+    """If a clip runs long, end it after the last sentence that finishes before target + 5s."""
+    if e - s <= target + 5:
+        return e
+    ends = [b for _, b in spans if s + min_len <= b <= s + target + 5]
+    return round(ends[-1] + 0.35, 2) if ends else e
+
+
+def punch_times(s, e, words, z, hop, keeps=None):
+    """Up to 4 moments in the clip worth a quick zoom: loud peaks and hype words, at least 4s apart."""
+    cands = []
+    if z is not None:
+        seg = z[int(s / hop): int(e / hop)]
+        if len(seg):
+            med = float(sorted(seg)[len(seg) // 2])
+            for i in range(1, len(seg) - 1):
+                if seg[i] >= seg[i - 1] and seg[i] >= seg[i + 1] and seg[i] - med > 1.0:
+                    cands.append((float(seg[i] - med), i * hop))
+    for w in words:
+        if s <= w["s"] <= e and any(h in w["w"].lower() for h in HYPE_WORDS):
+            cands.append((1.5, w["s"] - s))
+    out = []
+    for _, t0 in sorted(cands, reverse=True):
+        if t0 < 1.0 or t0 > e - s - 0.8 or any(abs(t0 - x) < 4 for x in out):
+            continue
+        out.append(t0)
+        if len(out) == 4:
+            break
+    if keeps:
+        out = [remap_time(x, keeps) for x in out]
+    return sorted(out)
+
+
+def zoom_filter(times, label_in, label_out, amount=0.10):
+    """Quick 'punch-in' zoom around each time (in output seconds), centred."""
+    pulse = "+".join(f"clip((t-{p:.2f})/0.08\\,0\\,1)*clip(({p + 0.55:.2f}-t)/0.2\\,0\\,1)" for p in times)
+    f = f"(1+{amount}*({pulse}))"
+    return (f";[{label_in}]scale=w={W}*{f}:h={H}*{f}:eval=frame,"
+            f"crop={W}:{H}:(iw-{W})/2:(ih-{H})/2[{label_out}]")
+
+
 def remap_time(t, keeps):
     """Time in the original clip -> time in the jump-cut clip."""
     out = 0.0
@@ -369,7 +445,8 @@ Pick the {k} best moments. Prefer: a clear setup and payoff, funny or shocking r
 For each pick, choose a precise start and end INSIDE its window:
 - start 1-2 seconds before the setup begins, so the clip hooks immediately
 - end right after the payoff/reaction lands (no trailing dead time)
-- length between {min_len} and {max_len} seconds
+- length between {min_len} and {max_len} seconds, ideally 20-35 seconds (short clips get rewatched)
+- the first 2 seconds must already be interesting: start ON the strongest line or reaction, not on build-up
 
 Reply with ONLY this JSON, no other text:
 {{"clips": [{{"id": <candidate id>, "start": <seconds>, "end": <seconds>, "title": "<on-screen hook, max 7 words>", "reason": "<one short line>"}}]}}
@@ -489,8 +566,17 @@ def stage_pick(job, args, force):
     clips = clean_clips(clips, cands, args, dur, limit=pool)
     words = [w for s in load_json(job / "transcript.json", {"segments": []})["segments"] for w in s.get("words", [])]
     spans = sentence_spans(words)
+    z = None
+    if (job / "audio.wav").exists():
+        import scorer
+        z, _ = scorer.loudness(job / "audio.wav", 0.25)
     for c in clips:
         c["start"], c["end"] = snap_to_sentences(c["start"], c["end"], spans, args.min_len, args.max_len, dur)
+        s0 = c["start"]
+        c["start"] = hook_start(c["start"], c["end"], spans, words, z, 0.25, args.min_len)
+        c["end"] = trim_to_target(c["start"], c["end"], spans, args.min_len, args.target_len)
+        if c["start"] != s0:
+            log(f"pick: hook-first start {fmt_t(s0)} -> {fmt_t(c['start'])}")
     clips.sort(key=lambda c: c["start"])
     clips = [c for i, c in enumerate(clips) if i == 0 or c["start"] >= clips[i - 1]["end"] - 1]
     scored_by = None
@@ -499,7 +585,7 @@ def stage_pick(job, args, force):
         log(f"pick: pre-scoring {len(clips)} picks to keep the best {args.count}")
         try:
             scored_by = scorer.score_clips(job, clips, used, args.judge, args.ollama_model, log=log,
-                                           hashtags=args.hashtags)
+                                           hashtags=args.hashtags, jump_cuts=not args.no_jump_cuts)
             ranked = sorted(clips, key=lambda c: -c["score"]["total"])
             for c in ranked[args.count:]:
                 log(f"pick: dropped {fmt_t(c['start'])}-{fmt_t(c['end'])} (score {c['score']['total']})")
@@ -666,7 +752,8 @@ def stage_render(job, args, force):
     all_words = [w for s in segs for w in s.get("words", [])]
     z = None
     use_cuts = bool(not args.text and not args.no_jump_cuts and all_words)
-    if use_cuts and (job / "audio.wav").exists():
+    use_zoom = bool(not args.text and not args.no_zoom)
+    if (use_cuts or use_zoom) and (job / "audio.wav").exists():
         import scorer
         z, _ = scorer.loudness(job / "audio.wav", 0.25)
     for n, c in enumerate(hl["clips"], 1):
@@ -697,18 +784,26 @@ def stage_render(job, args, force):
             words = [{"w": w["w"], "s": remap_time(w["s"], keeps), "e": remap_time(w["e"], keeps)} for w in words]
             out_len = sum(b - a for a, b in keeps)
         c["cut_seconds"] = round(removed if amap == "[acut]" else 0.0, 1)
+        c["keeps"] = [[round(a, 3), round(b, 3)] for a, b in keeps] if cutting else []
+        bl = "base"
+        if use_zoom:
+            punches = punch_times(s, e, all_words, z, 0.25, keeps if cutting else None)
+            c["zooms"] = [round(x, 2) for x in punches]
+            if punches:
+                graph += zoom_filter(punches, "base", "basez")
+                bl = "basez"
         if args.text:  # campaign mode: one approved line, no auto captions, no hook
             cover = parse_cover(args.cover) if args.cover else None
             write_overlay_ass(ass, args.text, e - s, cover, args.box_color)
             if cover:
                 x, y, w, h = cover
-                graph += f";[base]drawbox=x={x}:y={y}:w={w}:h={h}:color={args.box_color}@1:t=fill[base2]"
+                graph += f";[{bl}]drawbox=x={x}:y={y}:w={w}:h={h}:color={args.box_color}@1:t=fill[base2]"
                 graph += f";[base2]subtitles={ass.name}[v]"
             else:
-                graph += f";[base]subtitles={ass.name}[v]"
+                graph += f";[{bl}]subtitles={ass.name}[v]"
         else:
             write_ass(ass, words if not args.no_captions else [], "" if args.no_hook else c.get("title", ""), out_len, preset)
-            graph += f";[base]subtitles={ass.name}[v]"
+            graph += f";[{bl}]subtitles={ass.name}[v]"
         base = ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{s:.2f}", "-t", f"{e - s:.2f}", "-i", str(src),
                 "-filter_complex", graph, "-map", "[v]", "-map", amap, "-r", "30"]
         tail = ["-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", mp4.name]
@@ -725,9 +820,84 @@ def stage_render(job, args, force):
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{min(1.0, (e - s) / 2):.2f}", "-i", mp4.name,
                         "-frames:v", "1", "-vf", "scale=540:-1", f"{name}_preview.png"], cwd=outdir)
         cut = f", {c['cut_seconds']:.0f}s of pauses cut" if c.get("cut_seconds") else ""
-        log(f"render: {mp4.name}  ({out_len:.0f}s{cut})  {c.get('title', '')}")
+        zm = f", {len(c.get('zooms', []))} zooms" if c.get("zooms") else ""
+        log(f"render: {mp4.name}  ({out_len:.0f}s{cut}{zm})  {c.get('title', '')}")
+        c["out_len"] = round(out_len, 2)
+        c["_words_rendered"] = words  # for version B's teaser (dropped before saving)
+    if not args.text and args.variants > 0:
+        render_variants(job, hl, z, args, encoder)
+    for c in hl["clips"]:
+        c.pop("_words_rendered", None)
     save_json(job / "highlights.json", hl)
     log(f"done -> {outdir}")
+
+
+def render_variants(job, hl, z, args, encoder):
+    """Version B of the best clips: the payoff moment plays first (a 2s 'cold open'), then the clip.
+    Post both; the learning loop (learn.py) finds out which style works for your audience."""
+    clips = list(enumerate(hl["clips"], 1))
+    ranked = sorted(clips, key=lambda t: -t[1].get("score", {}).get("total", 0))[: args.variants]
+    for n, c in ranked:
+        name = f"clip_{n:02d}"
+        src, out = job / "clips" / f"{name}.mp4", job / "clips" / f"{name}_b.mp4"
+        if not src.exists():
+            continue
+        L = c.get("out_len") or (c["end"] - c["start"])
+        # payoff = loudest 2s in the back 60% of the clip (on the rendered timeline)
+        best, peak = -9.0, None
+        if z is not None:
+            keeps = c.get("keeps") or [[0.0, c["end"] - c["start"]]]
+            for k in range(int(L * 0.4 / 0.25), int((L - 1.5) / 0.25)):
+                tt = k * 0.25
+                # map rendered time back to source time to read the loudness
+                acc, srcs = 0.0, None
+                for a, b in keeps:
+                    if tt <= acc + (b - a):
+                        srcs = c["start"] + a + (tt - acc)
+                        break
+                    acc += b - a
+                if srcs is None:
+                    continue
+                seg = z[int(srcs / 0.25): int((srcs + 2) / 0.25)]
+                if len(seg) and float(seg.mean()) > best:
+                    best, peak = float(seg.mean()), tt
+        if peak is None:
+            peak = L * 0.7
+        # better: the payoff line the AI judge pointed at, found in the transcript
+        words = c.get("_words_rendered") or []
+        pl = (c.get("score", {}).get("payoff") or "").lower().split()
+        if len(pl) >= 2 and words:
+            ws = [w["w"].lower().strip(".,!?\"'") for w in words]
+            for i in range(len(ws) - 1):
+                if ws[i] == pl[0].strip(".,!?\"'") and ws[i + 1] == pl[1].strip(".,!?\"'"):
+                    peak = words[i]["s"] + 0.3
+                    break
+        a, b = max(0.0, peak - 0.3), min(L, peak + 1.9)
+        # snap the teaser to whole words: start at a word start, end after a word ends (max ~3s)
+        if words:
+            starts = [w["s"] for w in words if a - 0.6 <= w["s"] <= a + 0.6]
+            if starts:
+                a = max(0.0, min(starts, key=lambda x: abs(x - a)) - 0.1)
+            ends = [w["e"] for w in words if a + 1.2 <= w["e"] <= a + 3.0]
+            if ends:
+                b = min(L, ends[-1] + 0.15)
+        txt = " ".join(w["w"] for w in words if a <= w["s"] < b).lower()
+        if any(f in txt for f in FILLER_OPENERS):
+            log(f"render: skipped version B of {name} (its best moment is an intro / sponsor line)")
+            continue
+        graph = (f"[0:v]split[v1][v2];[0:a]asplit[a1][a2];"
+                 f"[v1]trim={a:.2f}:{b:.2f},setpts=PTS-STARTPTS[tv];[a1]atrim={a:.2f}:{b:.2f},asetpts=PTS-STARTPTS[ta];"
+                 f"[v2]setpts=PTS-STARTPTS[mv];[a2]asetpts=PTS-STARTPTS[ma];"
+                 f"[tv][ta][mv][ma]concat=n=2:v=1:a=1[v][a]")
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src.name, "-filter_complex", graph,
+               "-map", "[v]", "-map", "[a]", "-r", "30"] + ENCODERS[encoder] + \
+              ["-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.name]
+        try:
+            run(cmd, cwd=job / "clips")
+        except subprocess.CalledProcessError:
+            run(cmd[:cmd.index("-r") + 2] + ENCODERS["x264"] + cmd[cmd.index("-c:a"):], cwd=job / "clips")
+        c["variant_b"] = {"file": out.name, "teaser": [round(a, 2), round(b, 2)]}
+        log(f"render: {out.name}  (version B: payoff first, {b - a:.1f}s teaser)")
 
 
 # ----------------------------------------------------------------- stage 6: score
@@ -737,6 +907,7 @@ def stage_score(job, args, force):
     import scorer
     try:
         scorer.score_job(job, ai=args.judge, ollama_model=args.ollama_model, log=log, hashtags=args.hashtags,
+                         jump_cuts=not (args.text or args.no_jump_cuts),
                          rescore=force and args.from_stage == "score")  # reuse pick-stage scores
     except Exception as e:  # scoring is a bonus; never lose the rendered clips over it
         log(f"score: failed ({e})")
@@ -767,6 +938,11 @@ def cmd_run(args):
     JOBS.mkdir(exist_ok=True)
     job = JOBS / job_name_for(args.source, args.name)
     job.mkdir(parents=True, exist_ok=True)
+    global LOG_FILE
+    LOG_FILE = job / "run.log"
+    import datetime
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"\n===== {datetime.datetime.now():%Y-%m-%d %H:%M} clip.py {' '.join(sys.argv[1:])}\n")
     log(f"job folder: {job}")
     start = STAGES.index(args.from_stage) if args.from_stage else len(STAGES)
     fns = {"download": lambda f: stage_download(job, args.source, f),
@@ -790,6 +966,24 @@ def cmd_run(args):
         if args.until and st == args.until:
             log(f"stopped after {st} (--until)")
             break
+
+
+def cmd_test_ai(args):
+    """Check that the AI picker/judge can actually run, and say why not if it can't."""
+    import scorer
+    log("test-ai: asking Claude (claude -p) for a tiny JSON reply...")
+    try:
+        out = scorer.ask_claude('Reply with exactly this JSON and nothing else: {"ok": true}', timeout=180)
+        log(f"test-ai: Claude OK -> {out.strip()[:80]}")
+    except Exception as e:
+        log(f"test-ai: Claude FAILED -> {e}")
+        log("test-ai: fixes: run 'claude' once in a normal terminal and log in; don't start the app from inside "
+            "Claude Code; make sure 'claude --version' works in PowerShell")
+    try:
+        models = scorer.ollama_models()
+        log(f"test-ai: Ollama OK, models: {', '.join(models) or '(none installed)'}")
+    except Exception as e:
+        log(f"test-ai: Ollama not reachable ({e}). Start the Ollama app if you want the local fallback.")
 
 
 def cmd_result(args):
@@ -825,8 +1019,10 @@ def main():
     r.add_argument("--name", help="job folder name (default: video id / file name)")
     r.add_argument("--preset", default="blur", help="layout preset from presets.json")
     r.add_argument("--count", type=int, default=8, help="how many clips to make")
-    r.add_argument("--min-len", type=float, default=20)
+    r.add_argument("--min-len", type=float, default=15)
     r.add_argument("--max-len", type=float, default=55)
+    r.add_argument("--target-len", type=float, default=35,
+                   help="clips longer than this (+5s) get trimmed at a sentence end; short clips get rewatched")
     r.add_argument("--max-candidates", type=int, default=30)
     r.add_argument("--picker", choices=["auto", "claude", "ollama", "heuristic"], default="auto")
     r.add_argument("--ollama-model", default="qwen3:1.7b")
@@ -848,12 +1044,15 @@ def main():
     r.add_argument("--pool", type=float, default=2.0,
                    help="pick this many times --count, pre-score them, keep the best --count (1 = off)")
     r.add_argument("--no-jump-cuts", action="store_true", help="keep quiet pauses instead of cutting them out")
+    r.add_argument("--no-zoom", action="store_true", help="no punch-in zooms on loud / hype moments")
+    r.add_argument("--variants", type=int, default=2,
+                   help="also render a 'payoff first' version B of the N best clips (0 = off)")
     r.add_argument("--hashtags", default="", help="hashtags every post caption must include, e.g. \"#lany\"")
     r.set_defaults(func=cmd_run)
 
     res = sub.add_parser("result", help="log how a posted clip did (phase 4 learning loop)")
     res.add_argument("job", help="job folder name, e.g. tJbzMqJGH4k")
-    res.add_argument("clip", type=int, help="clip number (clip_03.mp4 -> 3)")
+    res.add_argument("clip", help="clip number (clip_03.mp4 -> 3, version B clip_03_b.mp4 -> 3b)")
     res.add_argument("platform", choices=["tiktok", "reels", "shorts"])
     res.add_argument("--views", type=int, required=True)
     res.add_argument("--likes", type=int, default=0)
@@ -861,6 +1060,9 @@ def main():
     res.add_argument("--shares", type=int, default=0)
     res.add_argument("--url", default="")
     res.set_defaults(func=cmd_result)
+
+    ta = sub.add_parser("test-ai", help="check that Claude / Ollama can run, and why not")
+    ta.set_defaults(func=cmd_test_ai)
 
     lr = sub.add_parser("learn", help="retune the score from logged results, write results.html")
     lr.add_argument("--open", action="store_true", help="open results.html afterwards")

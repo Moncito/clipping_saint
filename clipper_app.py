@@ -163,6 +163,7 @@ class App(tk.Tk):
         ttk.Button(bar, text="Open clips folder", command=self.open_clips).pack(side="left", padx=(20, 0))
         ttk.Button(bar, text="★ Open scores report", command=self.open_report).pack(side="left", padx=6)
         ttk.Button(bar, text="Open jobs folder", command=lambda: open_path(JOBS)).pack(side="left", padx=6)
+        ttk.Button(bar, text="Test AI", command=self.test_ai).pack(side="left", padx=6)
         self.status = ttk.Label(bar, text="Ready", foreground="#555")
         self.status.pack(side="right")
 
@@ -212,6 +213,8 @@ class App(tk.Tk):
         self.st_smart = tk.BooleanVar(value=s.get("smart", True))
         self.st_cuts = tk.BooleanVar(value=s.get("cuts", True))
         self.st_tags = tk.StringVar(value=s.get("tags", ""))
+        self.st_zoom = tk.BooleanVar(value=s.get("zoom", True))
+        self.st_ab = tk.BooleanVar(value=s.get("ab", True))
 
         self.source_row(t, 0, self.st_src)
         self.row(t, 1, "Job name", ttk.Entry(t, textvariable=self.st_name), "optional, reuse it to rerun the same video")
@@ -232,6 +235,8 @@ class App(tk.Tk):
         smart = ttk.Frame(t)
         ttk.Checkbutton(smart, text="Smart pick (find 2x, keep the best scored)", variable=self.st_smart).pack(side="left")
         ttk.Checkbutton(smart, text="Cut quiet pauses", variable=self.st_cuts).pack(side="left", padx=12)
+        ttk.Checkbutton(smart, text="Zoom on hype", variable=self.st_zoom).pack(side="left", padx=12)
+        ttk.Checkbutton(smart, text="Version B of top 2", variable=self.st_ab).pack(side="left", padx=12)
         self.row(t, 9, "", smart)
         self.row(t, 10, "Hashtags", ttk.Entry(t, textvariable=self.st_tags), "always added to post captions")
         ttk.Label(t, foreground="#777", text="Tip: preset 'track' follows faces in 16:9 videos (auto-reframe).").grid(
@@ -371,8 +376,11 @@ class App(tk.Tk):
             hl = json.loads((JOBS / self.rs_job.get() / "highlights.json").read_text(encoding="utf-8"))
         except Exception:
             return
-        vals = [f"{n} · score {c.get('score', {}).get('total', '?')} · {c.get('title') or ''}"
-                for n, c in enumerate(hl.get("clips", []), 1)]
+        vals = []
+        for n, c in enumerate(hl.get("clips", []), 1):
+            vals.append(f"{n} \u00b7 score {c.get('score', {}).get('total', '?')} \u00b7 {c.get('title') or ''}")
+            if c.get("variant_b"):
+                vals.append(f"{n}b \u00b7 version B (payoff first) \u00b7 {c.get('title') or ''}")
         self.rs_clip_box.config(values=vals)
         self.rs_clip.set(vals[0] if vals else "")
 
@@ -387,7 +395,7 @@ class App(tk.Tk):
     def save_result(self):
         import learn
         try:
-            job, clip = self.rs_job.get(), int(self.rs_clip.get().split()[0])
+            job, clip = self.rs_job.get(), self.rs_clip.get().split()[0]
             nums = {k: int(v.get().replace(",", "").strip() or 0) for k, v in self.rs_nums.items()}
             if nums["views"] <= 0:
                 raise ValueError("Enter the views.")
@@ -409,6 +417,20 @@ class App(tk.Tk):
         open_path(learn.RESULTS)
 
     # ------------------------------------------------------------ running
+    def test_ai(self):
+        """Run clip.py test-ai and show why Claude / Ollama can or can't judge."""
+        if self.proc:
+            return
+        self.say("\n$ clip.py test-ai\n", "ok")
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+        self.proc = subprocess.Popen([str(PY), str(ROOT / "clip.py"), "test-ai"], cwd=ROOT, env=env,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                     encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+        self.run_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
+        self.status.config(text="Testing AI…")
+        threading.Thread(target=self.reader, args=(self.proc,), daemon=True).start()
+
     def build_cmd(self):
         tab = self.nb.index(self.nb.select())
         if tab == 2:
@@ -435,6 +457,10 @@ class App(tk.Tk):
                 cmd.append("--no-jump-cuts")
             if self.st_tags.get().strip():
                 cmd += ["--hashtags", self.st_tags.get().strip()]
+            if not self.st_zoom.get():
+                cmd.append("--no-zoom")
+            if not self.st_ab.get():
+                cmd += ["--variants", "0"]
             return cmd
         src = self.cp_src.get().strip()
         times = self.cp_times.get().strip()
@@ -575,7 +601,7 @@ class App(tk.Tk):
                                 whisper=self.st_whisper.get(), lang=self.st_lang.get(),
                                 cpu=self.st_cpu.get(), nocap=self.st_nocap.get(),
                                 smart=self.st_smart.get(), cuts=self.st_cuts.get(),
-                                tags=self.st_tags.get())
+                                tags=self.st_tags.get(), zoom=self.st_zoom.get(), ab=self.st_ab.get())
         self.s["campaign"] = dict(src=self.cp_src.get(), name=self.cp_name.get(), times=self.cp_times.get(),
                                   text=self.cp_text.get(), preset=self.cp_preset.get(), box=self.cp_box.get(),
                                   use_cover=self.cp_use_cover.get(), cover=self.cp_cover.get(),
