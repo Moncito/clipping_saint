@@ -19,3 +19,8 @@ jobs/
 
 # face model (auto-downloaded by reframe.py)
 models/
+
+# your posted-clip results + learned weights (personal stats)
+performance.csv
+calibration.json
+results.html

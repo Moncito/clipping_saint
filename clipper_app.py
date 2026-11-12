@@ -146,9 +146,12 @@ class App(tk.Tk):
         self.camp_tab = ttk.Frame(nb, padding=10)
         nb.add(self.stream_tab, text="  Stream clips  ")
         nb.add(self.camp_tab, text="  Campaign clip  ")
+        self.res_tab = ttk.Frame(nb, padding=10)
+        nb.add(self.res_tab, text="  Results (learn)  ")
         self.nb = nb
         self.build_stream()
         self.build_campaign()
+        self.build_results()
         nb.select(self.s.get("tab", 0))
 
         bar = ttk.Frame(self, padding=(10, 0))
@@ -323,9 +326,93 @@ class App(tk.Tk):
             self.cp_use_cover.set(True)
         CoverPicker(self, str(png), done, cur)
 
+    # ------------------------------------------------------------ results tab (phase 4)
+    def build_results(self):
+        t = self.res_tab
+        self.rs_job = tk.StringVar()
+        self.rs_clip = tk.StringVar()
+        self.rs_pf = tk.StringVar(value="tiktok")
+        self.rs_nums = {k: tk.StringVar() for k in ("views", "likes", "comments", "shares")}
+        self.rs_url = tk.StringVar()
+        ttk.Label(t, foreground="#555", wraplength=720, text=(
+            "After a clip has been up for a few days, type its numbers here. Once about 10 posted clips "
+            "are logged, the score starts weighting Hook / Flow / Value / Trend by what actually gets YOU views.")
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        jobs = ttk.Combobox(t, textvariable=self.rs_job, values=self.scored_jobs(), state="readonly",
+                            postcommand=lambda: jobs.config(values=self.scored_jobs()))
+        jobs.bind("<<ComboboxSelected>>", lambda e: self.load_clips())
+        self.row(t, 1, "Job", jobs)
+        self.rs_clip_box = ttk.Combobox(t, textvariable=self.rs_clip, state="readonly")
+        self.row(t, 2, "Clip", self.rs_clip_box)
+        self.row(t, 3, "Platform", ttk.Combobox(t, textvariable=self.rs_pf, values=["tiktok", "reels", "shorts"],
+                                                 state="readonly", width=10))
+        nums = ttk.Frame(t)
+        for k, v in self.rs_nums.items():
+            ttk.Label(nums, text=k.title()).pack(side="left")
+            ttk.Entry(nums, textvariable=v, width=10).pack(side="left", padx=(4, 12))
+        self.row(t, 4, "Numbers", nums)
+        self.row(t, 5, "Post link", ttk.Entry(t, textvariable=self.rs_url), "optional")
+        btns = ttk.Frame(t)
+        ttk.Button(btns, text="Save result", command=self.save_result).pack(side="left")
+        ttk.Button(btns, text="Learn + open dashboard", command=self.run_learn).pack(side="left", padx=8)
+        self.rs_count = ttk.Label(btns, foreground="#555")
+        self.rs_count.pack(side="left", padx=8)
+        self.row(t, 6, "", btns)
+        self.update_count()
+
+    def scored_jobs(self):
+        out = []
+        for p in sorted(JOBS.glob("*/highlights.json"), key=lambda p: -p.stat().st_mtime):
+            out.append(p.parent.name)
+        return out
+
+    def load_clips(self):
+        try:
+            hl = json.loads((JOBS / self.rs_job.get() / "highlights.json").read_text(encoding="utf-8"))
+        except Exception:
+            return
+        vals = [f"{n} · score {c.get('score', {}).get('total', '?')} · {c.get('title') or ''}"
+                for n, c in enumerate(hl.get("clips", []), 1)]
+        self.rs_clip_box.config(values=vals)
+        self.rs_clip.set(vals[0] if vals else "")
+
+    def update_count(self):
+        try:
+            import learn
+            n = len(learn.read_rows())
+            self.rs_count.config(text=f"{n} result(s) logged")
+        except Exception:
+            pass
+
+    def save_result(self):
+        import learn
+        try:
+            job, clip = self.rs_job.get(), int(self.rs_clip.get().split()[0])
+            nums = {k: int(v.get().replace(",", "").strip() or 0) for k, v in self.rs_nums.items()}
+            if nums["views"] <= 0:
+                raise ValueError("Enter the views.")
+            learn.add_result(job, clip, self.rs_pf.get(), nums["views"], nums["likes"], nums["comments"],
+                             nums["shares"], self.rs_url.get().strip())
+        except (ValueError, IndexError) as e:
+            messagebox.showwarning("Clipper", f"Couldn't save: {e or 'pick a job and clip first'}")
+            return
+        self.say(f"Saved: {job} clip {clip} on {self.rs_pf.get()} ({nums['views']:,} views)\n", "ok")
+        for v in self.rs_nums.values():
+            v.set("")
+        self.rs_url.set("")
+        self.update_count()
+
+    def run_learn(self):
+        import learn
+        learn.learn(log=lambda m: self.say(m + "\n"))
+        self.update_count()
+        open_path(learn.RESULTS)
+
     # ------------------------------------------------------------ running
     def build_cmd(self):
         tab = self.nb.index(self.nb.select())
+        if tab == 2:
+            raise ValueError("On the Results tab, use Save result / Learn + open dashboard.")
         if tab == 0:
             src = self.st_src.get().strip()
             if not src:
