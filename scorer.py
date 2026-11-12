@@ -41,7 +41,7 @@ def with_tags(text, required):
 def platform_titles(ai_titles, title):
     """3 title options per platform (best first): the AI's, or templates when it gave nothing usable."""
     base = (title or "wait for it").strip().rstrip(".")
-    low = base[0].lower() + base[1:] if base else base
+    low = base  # keep capitals: names like "Jo Koy" must stay correct
     templates = {"tiktok": [base, f"wait for it... {low}", f"POV: {low}"],
                  "reels": [f"{base} \U0001F633", f"nobody expected this: {low}", f"watch till the end ({low})"],
                  "shorts": [base, f"{base} (wait for it)", f"{base} \U0001F633 #shorts"]}

@@ -625,10 +625,14 @@ def video_filter(preset, track=None):
                 f"crop={W}:{top}[cam];"
                 f"[g]crop=ih*{W}/{bot}:ih:(iw-ih*{W}/{bot})*{gx}:0,scale={W}:{bot}[game];"
                 f"[cam][game]vstack,setsar=1[base]")
-    # blur: whole frame fit to width, blurred zoomed copy behind it
+    # blur: whole frame fit to width, blurred zoomed copy behind it.
+    # optional "fg_crop": [x, w] keeps only that horizontal slice in the foreground (bigger subject,
+    # e.g. [0.25, 0.75] keeps a top-right logo while cutting empty space on the left)
+    fx, fw = preset.get("fg_crop", [0, 1])
+    fg_crop = f"crop=iw*{fw}:ih:iw*{fx}:0," if fw < 1 else ""
     return (f"[0:v]split[a][b];"
             f"[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=20:2[bg];"
-            f"[b]scale={W}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[base]")
+            f"[b]{fg_crop}scale={W}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[base]")
 
 
 def ass_time(t):
@@ -864,7 +868,9 @@ def render_variants(job, hl, z, args, encoder):
     """Version B of the best clips: the payoff moment plays first (a 2s 'cold open'), then the clip.
     Post both; the learning loop (learn.py) finds out which style works for your audience."""
     clips = list(enumerate(hl["clips"], 1))
-    ranked = sorted(clips, key=lambda t: -t[1].get("score", {}).get("total", 0))[: args.variants]
+    # clips with a hand-picked "payoff" line in highlights.json go first, then the best scored
+    ranked = sorted(clips, key=lambda t: (not t[1].get("payoff"),
+                                          -t[1].get("score", {}).get("total", 0)))[: args.variants]
     for n, c in ranked:
         name = f"clip_{n:02d}"
         src, out = job / "clips" / f"{name}.mp4", job / "clips" / f"{name}_b.mp4"
@@ -893,7 +899,7 @@ def render_variants(job, hl, z, args, encoder):
             peak = L * 0.7
         # better: the payoff line the AI judge pointed at, found in the transcript
         words = c.get("_words_rendered") or []
-        pl = (c.get("score", {}).get("payoff") or "").lower().split()
+        pl = (c.get("payoff") or c.get("score", {}).get("payoff") or "").lower().split()
         if len(pl) >= 2 and words:
             ws = [w["w"].lower().strip(".,!?\"'") for w in words]
             for i in range(len(ws) - 1):
@@ -906,9 +912,11 @@ def render_variants(job, hl, z, args, encoder):
             starts = [w["s"] for w in words if a - 0.6 <= w["s"] <= a + 0.6]
             if starts:
                 a = max(0.0, min(starts, key=lambda x: abs(x - a)) - 0.1)
-            ends = [w["e"] for w in words if a + 1.2 <= w["e"] <= a + 3.0]
+            win = [w for w in words if a + 1.0 <= w["e"] <= a + 3.5]
+            full = [w["e"] for w in win if re.search(r"[.!?…]$", w["w"].strip())]   # end on a full sentence
+            ends = full or [w["e"] for w in win]
             if ends:
-                b = min(L, ends[-1] + 0.15)
+                b = min(L, (full[0] if full else ends[-1]) + 0.15)
         txt = " ".join(w["w"] for w in words if a <= w["s"] < b).lower()
         if any(f in txt for f in FILLER_OPENERS):
             log(f"render: skipped version B of {name} (its best moment is an intro / sponsor line)")
