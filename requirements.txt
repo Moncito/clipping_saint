@@ -4,3 +4,5 @@ numpy
 # CUDA 12 runtime libraries for faster-whisper on the GPU (Windows/Linux)
 nvidia-cublas-cu12
 nvidia-cudnn-cu12==9.*
+# face detection for the track (auto-reframe) preset, CPU only
+opencv-python-headless

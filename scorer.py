@@ -22,6 +22,32 @@ from pathlib import Path
 HYPE = ["no way", "let's go", "lets go", "oh my god", "omg", "what the", "bro", "dude", "haha", "insane",
         "crazy", "clutch", "wait", "oh no", "holy", "shit", "fuck", "grabe", "hala", "tangina", "yo"]
 CATS = ["hook", "flow", "value", "trend"]
+PLATFORMS = ["tiktok", "reels", "shorts"]
+PLATFORM_TAG = {"tiktok": "#fyp", "reels": "#reels", "shorts": "#shorts"}
+
+
+def with_tags(text, required):
+    """Make sure every required hashtag is in the caption."""
+    for tag in required.split():
+        tag = tag if tag.startswith("#") else "#" + tag
+        if tag.lower() not in text.lower():
+            text = f"{text} {tag}"
+    return text.strip()
+
+
+def post_captions(ai_post, title, hashtags):
+    """Final captions per platform: the AI's, or a simple template when no AI answered."""
+    ai_post = {k: v for k, v in (ai_post or {}).items() if len(v) >= 12 and " " in v}
+    if len(set(ai_post.values())) < len(PLATFORMS):   # weak model repeated itself: use templates
+        ai_post = {}
+    base = (title or "wait for it").strip().rstrip(".")
+    templates = {"tiktok": f"{base} \U0001F62D", "reels": f"{base}... watch till the end \U0001F440",
+                 "shorts": f"{base}"}
+    out = {}
+    for pf in PLATFORMS:
+        text = ai_post.get(pf) or templates[pf]
+        out[pf] = with_tags(text, f"{hashtags} {PLATFORM_TAG[pf] if pf == 'shorts' else ''}")
+    return out
 AI_WEIGHT = 0.65
 
 
@@ -116,21 +142,28 @@ Reply with ONLY this JSON:
 {{"clips": [{{"n": <clip number>, "hook": 0-25, "flow": 0-25, "value": 0-25, "trend": 0-25,
 "why": "<one short line: the main reason for the score>",
 "title": "<better on-screen hook, max 7 words>",
-"fix": "<one concrete edit that would raise the score, e.g. start 3s later at 'X'>"}}]}}
+"fix": "<one concrete edit that would raise the score, e.g. start 3s later at 'X'>",
+"post": {{"tiktok": "<post caption>", "reels": "<post caption>", "shorts": "<post caption>"}}}}]}}
+
+Post captions (what goes under the video when posting, one per platform):
+- short (max ~120 characters before hashtags), same mood as the clip, may use 1-2 emoji
+- end with 3-5 relevant hashtags; ALWAYS include these required hashtags: {hashtags}
+- shorts caption must include #shorts; make the three captions different from each other
+- nothing negative about anyone in the video, no gossip, no misleading claims, no clickbait lies
 
 CLIPS:
 {body}
 """
 
 
-def judge_prompt(clips, context):
+def judge_prompt(clips, context, hashtags=""):
     parts = []
     for c in clips:
         sg = c["_sig"]
         meta = ", ".join(f"{k}={v}" for k, v in sg.items())
         parts.append(f"[clip {c['_n']}] {c['end'] - c['start']:.0f}s, current title: {c.get('title') or '(none)'}\n"
                      f"signals: {meta}\ntranscript: {c['_text'] or '(no speech: music / gameplay audio)'}")
-    return JUDGE_PROMPT.format(context=context, body="\n\n".join(parts))
+    return JUDGE_PROMPT.format(context=context, hashtags=hashtags or "(none)", body="\n\n".join(parts))
 
 
 def ask_claude(prompt):
@@ -176,6 +209,8 @@ def parse_judge(text):
             n = int(c["n"])
             out[n] = {k: _clamp(float(c[k]), 0, 25) for k in CATS}
             out[n].update({k: str(c.get(k, ""))[:160] for k in ("why", "title", "fix")})
+            post = c.get("post") if isinstance(c.get("post"), dict) else {}
+            out[n]["post"] = {k: str(post.get(k, "")).strip()[:400] for k in PLATFORMS if post.get(k)}
         except (KeyError, TypeError, ValueError):
             continue
     if not out:
@@ -184,7 +219,8 @@ def parse_judge(text):
 
 
 # ------------------------------------------------------------------ main entry
-def score_clips(job, clips, picker="", ai="auto", ollama_model="qwen3:1.7b", context=None, log=print):
+def score_clips(job, clips, picker="", ai="auto", ollama_model="qwen3:1.7b", context=None, log=print,
+                hashtags=""):
     """Adds clip["score"] to every clip (in place). Works before rendering: only needs audio + transcript.
     Returns who judged ('claude', 'ollama:<model>' or 'signals')."""
     job = Path(job)
@@ -211,7 +247,7 @@ def score_clips(job, clips, picker="", ai="auto", ollama_model="qwen3:1.7b", con
                    "campaign clips of provided footage (often live music) with one fixed on-screen text line")
     judged, by = {}, "signals"
     if ai != "none":
-        prompt = judge_prompt(clips, context)
+        prompt = judge_prompt(clips, context, hashtags)
         (job / "score_prompt.txt").write_text(prompt, encoding="utf-8")
         tries = {"auto": ["claude", "ollama"], "claude": ["claude"], "ollama": ["ollama"]}.get(ai, [])
         for t in tries:
@@ -234,12 +270,14 @@ def score_clips(job, clips, picker="", ai="auto", ollama_model="qwen3:1.7b", con
         total = int(round(_clamp(sum(parts.values()), 1, 99)))
         c["score"] = {"total": total, **parts, "by": by if aj else "signals", "signals": c.pop("_sig"),
                       "why": (aj or {}).get("why", ""), "fix": (aj or {}).get("fix", ""),
-                      "ai_title": (aj or {}).get("title", "")}
+                      "ai_title": (aj or {}).get("title", ""),
+                      "post": post_captions((aj or {}).get("post"), c.get("title") or (aj or {}).get("title", ""),
+                                            hashtags)}
         c.pop("_n"), c.pop("_text")
     return by
 
 
-def score_job(job, ai="auto", ollama_model="qwen3:1.7b", context=None, log=print, rescore=True):
+def score_job(job, ai="auto", ollama_model="qwen3:1.7b", context=None, log=print, rescore=True, hashtags=""):
     """Score the clips in highlights.json (unless already scored and rescore=False), save, write report."""
     job = Path(job)
     hl = json.loads((job / "highlights.json").read_text(encoding="utf-8"))
@@ -248,9 +286,16 @@ def score_job(job, ai="auto", ollama_model="qwen3:1.7b", context=None, log=print
         log("score: no clips")
         return
     if rescore or not all("score" in c for c in clips):
-        hl["scored_by"] = score_clips(job, clips, hl.get("picker", ""), ai, ollama_model, context, log)
+        hl["scored_by"] = score_clips(job, clips, hl.get("picker", ""), ai, ollama_model, context, log, hashtags)
         (job / "highlights.json").write_text(json.dumps(hl, indent=2, ensure_ascii=False), encoding="utf-8")
     by = hl.get("scored_by", "signals")
+    for n, c in enumerate(clips, 1):  # ready-to-paste post captions next to each clip
+        post = c["score"].get("post") or post_captions(None, c.get("title"), hashtags)
+        c["score"]["post"] = post
+        if (job / "clips").exists():
+            (job / "clips" / f"clip_{n:02d}_post.txt").write_text(
+                "\n\n".join(f"[{pf.upper()}]\n{post[pf]}" for pf in PLATFORMS) + "\n", encoding="utf-8")
+    (job / "highlights.json").write_text(json.dumps(hl, indent=2, ensure_ascii=False), encoding="utf-8")
     write_report(job, hl)
     ranked = sorted(enumerate(clips, 1), key=lambda t: -t[1]["score"]["total"])
     log(f"score: ranked by {by} (best first)")
@@ -292,6 +337,10 @@ def write_report(job, hl):
             notes += f'<p><strong>Fix:</strong> {html.escape(sc["fix"])}</p>'
         if sc.get("ai_title") and sc["ai_title"] != c.get("title"):
             notes += f'<p><strong>Title idea:</strong> {html.escape(sc["ai_title"])}</p>'
+        if sc.get("post"):
+            notes += '<div class="post">' + "".join(
+                f'<div><b>{pf.title()}</b><button onclick="cp(this)">Copy</button>'
+                f'<span>{html.escape(sc["post"].get(pf, ""))}</span></div>' for pf in PLATFORMS) + "</div>"
         cards.append(f"""
 <article class="card">
   <video src="clips/{name}.mp4" poster="clips/{name}_preview.png" controls preload="none" playsinline></video>
@@ -324,11 +373,20 @@ video{{width:42%;aspect-ratio:9/16;background:#000;object-fit:cover}}
 .bar em{{font-style:normal;color:var(--mut);text-align:right}}
 .chips{{display:flex;flex-wrap:wrap;gap:4px;margin:10px 0 4px}}.chips span{{font-size:11px;padding:2px 7px;border:1px solid var(--line);border-radius:10px;color:var(--mut)}}
 .body p{{margin:6px 0 0;font-size:13px}}
+.post{{margin-top:8px;display:grid;gap:6px}}.post div{{border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-size:12px}}
+.post b{{font-size:11px;color:var(--mut);text-transform:uppercase}}.post span{{display:block;margin-top:2px}}
+.post button{{float:right;font-size:11px;padding:1px 8px;border-radius:6px;border:1px solid var(--line);background:none;color:var(--fg);cursor:pointer}}
 @media (max-width:560px){{main{{grid-template-columns:1fr}}.card{{flex-direction:column}}
  video{{width:100%;max-height:70vh}}}}
 </style></head><body>
 <header><h1>{html.escape(job.name)} — clips ranked</h1>
 <p>Score 0-99 = Hook + Flow + Value + Trend. Scored by {html.escape(hl.get('scored_by', 'signals'))}.
 A sorting aid, not a view prediction. Watch before posting.</p></header>
-<main>{''.join(cards)}</main></body></html>"""
+<main>{''.join(cards)}</main>
+<script>
+function cp(b){{const t=b.nextElementSibling.textContent;const done=()=>{{b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1200)}};
+try{{navigator.clipboard.writeText(t).then(done,()=>fb(t,done))}}catch(e){{fb(t,done)}}}}
+function fb(t,done){{const a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();
+try{{document.execCommand('copy');done()}}catch(e){{}}a.remove()}}
+</script></body></html>"""
     (job / "report.html").write_text(page, encoding="utf-8")

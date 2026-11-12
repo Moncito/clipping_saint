@@ -16,3 +16,6 @@ jobs/
 *.mkv
 *.webm
 *.wav
+
+# face model (auto-downloaded by reframe.py)
+models/

@@ -10,30 +10,54 @@
   },
   "cam-bottom-right": {
     "layout": "stack",
-    "cam": [0.75, 0.70, 0.25, 0.30],
+    "cam": [
+      0.75,
+      0.7,
+      0.25,
+      0.3
+    ],
     "top_height": 640,
     "game_x": 0.45,
     "caption_margin_v": 1100
   },
   "cam-bottom-left": {
     "layout": "stack",
-    "cam": [0.0, 0.70, 0.25, 0.30],
+    "cam": [
+      0.0,
+      0.7,
+      0.25,
+      0.3
+    ],
     "top_height": 640,
     "game_x": 0.55,
     "caption_margin_v": 1100
   },
   "cam-top-right": {
     "layout": "stack",
-    "cam": [0.75, 0.0, 0.25, 0.30],
+    "cam": [
+      0.75,
+      0.0,
+      0.25,
+      0.3
+    ],
     "top_height": 640,
     "game_x": 0.45,
     "caption_margin_v": 1100
   },
   "cam-top-left": {
     "layout": "stack",
-    "cam": [0.0, 0.0, 0.25, 0.30],
+    "cam": [
+      0.0,
+      0.0,
+      0.25,
+      0.3
+    ],
     "top_height": 640,
     "game_x": 0.55,
     "caption_margin_v": 1100
+  },
+  "track": {
+    "layout": "track",
+    "caption_margin_v": 520
   }
 }

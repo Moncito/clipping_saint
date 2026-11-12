@@ -38,9 +38,15 @@
 - Captions: chunks break on punctuation, active word pops (scale) and turns green on hype words.
 - Still open: hook boost (flash the strongest line as the opener).
 
-### Phase 3 — Reframe + polish
-- Face tracking reframe (MediaPipe on CPU, fits the 4 GB GPU limit) for non-facecam videos.
-- Per-platform caption + hashtag suggestions written next to each clip (never auto-posted).
+### Phase 3 — Reframe + polish  ✅ built
+- `track` preset: face-tracking reframe for 16:9 videos. OpenCV YuNet face detector on the CPU
+  (keeps the 4 GB GPU free), ~4 samples/s, follows the biggest face, "camera operator" smoothing
+  (dead zone + 0.5s hold, 0.4s glides, instant cuts on shot changes). Falls back to blur when
+  there's a face in < 25% of the clip. Works together with jump cuts.
+- Post captions: the AI judge also writes TikTok / Reels / Shorts captions with hashtags
+  (`--hashtags` adds required tags, e.g. a campaign's `#lany`), brand-safe rules in the prompt.
+  Weak/duplicate AI captions fall back to templates. Saved as `clips/clip_NN_post.txt` and shown
+  in the report with Copy buttons. Never auto-posted.
 
 ### Phase 4 — Learn from real results (the part Opus can't do for *you*)
 - `performance.csv`: after posting, you add views / likes / watch time per clip.
