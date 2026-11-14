@@ -67,5 +67,13 @@
       0.75
     ],
     "caption_margin_v": 440
+  },
+  "blur-center-43": {
+    "layout": "blur",
+    "fg_crop": [
+      0.125,
+      0.75
+    ],
+    "caption_margin_v": 440
   }
 }

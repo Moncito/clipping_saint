@@ -708,7 +708,7 @@ WrapStyle: 0
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Cap,Arial,92,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,7,3,2,60,60,{cap_y},1
 Style: Hook,Arial,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&HC0000000,-1,0,0,0,100,100,0,0,3,18,0,8,70,70,170,1
-Style: Story,Arial,62,&H00FFFFFF,&H00FFFFFF,&H00000000,&HC0000000,-1,0,0,0,100,100,0,0,3,18,0,8,80,80,190,1
+Style: Story,Arial,78,&H00FFFFFF,&H00FFFFFF,&H00000000,&HC0000000,-1,0,0,0,100,100,0,0,3,18,0,8,80,80,190,1
 Style: Brand,Arial,58,&H0000C8FF,&H0000C8FF,&H00000000,&HE0000000,-1,0,0,0,100,100,4,0,3,14,0,8,60,60,60,1
 
 [Events]
@@ -722,6 +722,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                      "{\\fad(150,150)}" + ass_escape(text))
     if title and not story:
         lines.append(f"Dialogue: 1,{ass_time(0)},{ass_time(min(3.0, clip_len))},Hook,,0,0,0,,{ass_escape(title.upper())}")
+    words = [{**w, "w": clean_banned(w["w"])} for w in words]
     # glue fragments like ",400" (from "6,400") or "'s" back onto the word before them
     merged = []
     for w in words:
@@ -809,7 +810,12 @@ def make_cover(outdir, name, c, preset, src, args, track=None):
     in the middle (inside the 4:5 area Instagram/TikTok grids show). No AI images: real footage + text."""
     text = c.get("title") or args.text or (parse_story(args.story)[0][2] if args.story else "")
     # "cover_at" (absolute seconds) in highlights.json picks the frame by hand
-    t = float(c["cover_at"]) if c.get("cover_at") is not None else best_frame_time(src, c["start"], c["end"])
+    if c.get("cover_at") is not None:
+        t = float(c["cover_at"])
+    elif getattr(args, "cover_at", None) is not None:   # --cover-at: seconds after the clip start
+        t = c["start"] + args.cover_at
+    else:
+        t = best_frame_time(src, c["start"], c["end"])
     if track:  # hold the face-tracking crop where it is around that moment
         rel = t - c["start"]
         x = min(track, key=lambda k: abs(k[0] - rel))[1]
@@ -845,6 +851,26 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", str(src), "-filter_complex", graph,
                     "-map", "[v]", "-frames:v", "1", "-q:v", "2", f"{name}_cover.jpg"], cwd=outdir, check=True)
     c["cover"] = f"{name}_cover.jpg"
+
+
+SAFE_SWAPS = {"fighters": "bots", "fighter": "bot", "fighting": "boxing", "fights": "matches", "fight": "match",
+              "fought": "boxed", "battles": "matches", "battle": "match", "combat": "boxing", "brawl": "scrap",
+              "war": "match", "destroyed": "dropped", "destroys": "drops", "destroy": "drop",
+              "killed": "rocked", "kills": "rocks", "kill": "rock", "ufc": "robot boxing", "mma": "robot boxing"}
+
+
+def clean_banned(word):
+    """Swap a banned campaign word in a caption for an allowed one (on-screen text only; audio is untouched)."""
+    import scorer
+    if not scorer.BANNED:
+        return word
+    core = re.sub(r"[^\w']", "", word).lower()
+    for bad in scorer.BANNED:
+        stem_hit = core.startswith(bad) if bad not in ("war", "kill") else core in (bad, bad + "s", bad + "ed")
+        if stem_hit:
+            swap = SAFE_SWAPS.get(core) or SAFE_SWAPS.get(bad) or "***"
+            return re.sub(re.escape(re.sub(r"[^\w']", "", word)), swap, word, flags=re.I) if core else word
+    return word
 
 
 def check_banned(hl, args):
@@ -1192,6 +1218,8 @@ def main():
                    help="campaign rule 'original music unchanged': no jump cuts, no version B (trimming only)")
     r.add_argument("--brand", default="", help="brand tag shown the whole clip, e.g. \"MOVIETONE NEWS\"")
     r.add_argument("--no-cover", action="store_true", help="don't make clip_NN_cover.jpg cover photos")
+    r.add_argument("--cover-at", type=float, default=None,
+                   help="cover frame = this many seconds after each clip's start (default: auto-pick)")
     r.add_argument("--banned", default="",
                    help="comma-separated words the campaign forbids in on-screen text, titles and captions")
     r.add_argument("--caption-line", default="",
