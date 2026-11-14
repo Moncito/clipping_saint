@@ -213,6 +213,8 @@ class App(tk.Tk):
         self.st_smart = tk.BooleanVar(value=s.get("smart", True))
         self.st_cuts = tk.BooleanVar(value=s.get("cuts", True))
         self.st_tags = tk.StringVar(value=s.get("tags", ""))
+        self.banned = tk.StringVar(value=self.s.get("banned", ""))
+        self.cap_line = tk.StringVar(value=self.s.get("cap_line", ""))
         self.st_zoom = tk.BooleanVar(value=s.get("zoom", True))
         self.st_ab = tk.BooleanVar(value=s.get("ab", True))
 
@@ -241,6 +243,8 @@ class App(tk.Tk):
         self.row(t, 10, "Hashtags", ttk.Entry(t, textvariable=self.st_tags), "always added to post captions")
         ttk.Label(t, foreground="#777", text="Tip: preset 'track' follows faces in 16:9 videos (auto-reframe).").grid(
             row=11, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.row(t, 12, "Banned words", ttk.Entry(t, textvariable=self.banned), "from the brief, comma separated")
+        self.row(t, 13, "Caption line", ttk.Entry(t, textvariable=self.cap_line), "required in every caption")
 
     # ------------------------------------------------------------ campaign tab
     def build_campaign(self):
@@ -289,6 +293,8 @@ class App(tk.Tk):
         self.row(t, 12, "Brand tag", ttk.Entry(t, textvariable=self.cp_brand), "shown all clip, e.g. MOVIETONE NEWS")
         self.row(t, 13, "", ttk.Checkbutton(t, text="Keep original audio/music unchanged (no cuts, no version B)",
                                              variable=self.cp_keep_audio))
+        self.row(t, 14, "Banned words", ttk.Entry(t, textvariable=self.banned), "from the brief, comma separated")
+        self.row(t, 15, "Caption line", ttk.Entry(t, textvariable=self.cap_line), "required in every caption")
         ttk.Label(t, foreground="#a05000",
                   text="After it renders, open clips\\clip_NN_preview.png and the video itself: "
                        "NO original text may show anywhere, or the clip is not paid.").grid(
@@ -519,6 +525,10 @@ class App(tk.Tk):
             return
         try:
             args = self.build_cmd()
+            if self.banned.get().strip():
+                args += ["--banned", self.banned.get().strip()]
+            if self.cap_line.get().strip():
+                args += ["--caption-line", self.cap_line.get().strip()]
         except ValueError as e:
             if str(e) != "Cancelled.":
                 messagebox.showwarning("Clipper", str(e))
@@ -613,6 +623,7 @@ class App(tk.Tk):
 
     def remember(self):
         self.s["tab"] = self.nb.index(self.nb.select())
+        self.s["banned"], self.s["cap_line"] = self.banned.get(), self.cap_line.get()
         self.s["stream"] = dict(src=self.st_src.get(), name=self.st_name.get(), preset=self.st_preset.get(),
                                 count=self.st_count.get(), picker=self.st_picker.get(),
                                 whisper=self.st_whisper.get(), lang=self.st_lang.get(),
