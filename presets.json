@@ -59,5 +59,21 @@
   "track": {
     "layout": "track",
     "caption_margin_v": 520
+  },
+  "blur-logo-right": {
+    "layout": "blur",
+    "fg_crop": [
+      0.25,
+      0.75
+    ],
+    "caption_margin_v": 440
+  },
+  "blur-center-43": {
+    "layout": "blur",
+    "fg_crop": [
+      0.125,
+      0.75
+    ],
+    "caption_margin_v": 440
   }
 }

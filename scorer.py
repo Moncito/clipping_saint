@@ -29,6 +29,15 @@ PLATFORMS = ["tiktok", "reels", "shorts"]
 PLATFORM_TAG = {"tiktok": "#fyp", "reels": "#reels", "shorts": "#shorts"}
 
 
+BANNED = []        # campaign words that must never appear (set by clip.py --banned)
+CAPTION_LINE = ""  # campaign line every caption must contain, right after the hook (--caption-line)
+
+
+def has_banned(text):
+    low = f" {text.lower()} "
+    return [b for b in BANNED if re.search(rf"(?<![a-z]){re.escape(b)}(?![a-z])", low)]
+
+
 def with_tags(text, required):
     """Make sure every required hashtag is in the caption."""
     for tag in required.split():
@@ -41,11 +50,12 @@ def with_tags(text, required):
 def platform_titles(ai_titles, title):
     """3 title options per platform (best first): the AI's, or templates when it gave nothing usable."""
     base = (title or "wait for it").strip().rstrip(".")
-    low = base[0].lower() + base[1:] if base else base
+    low = base  # keep capitals: names like "Jo Koy" must stay correct
     templates = {"tiktok": [base, f"wait for it... {low}", f"POV: {low}"],
                  "reels": [f"{base} \U0001F633", f"nobody expected this: {low}", f"watch till the end ({low})"],
                  "shorts": [base, f"{base} (wait for it)", f"{base} \U0001F633 #shorts"]}
-    ai = {pf: [x for x in (ai_titles or {}).get(pf, []) if len(x) >= 6] for pf in PLATFORMS}
+    ai = {pf: [x for x in (ai_titles or {}).get(pf, []) if len(x) >= 6 and not has_banned(x)] for pf in PLATFORMS}
+    templates = {pf: [x for x in v if not has_banned(x)] or [base] for pf, v in templates.items()}
     same = len({tuple(v) for v in ai.values()}) == 1   # weak model copied one list everywhere
     out = {}
     for pf in PLATFORMS:
@@ -59,7 +69,7 @@ def platform_titles(ai_titles, title):
 
 def post_captions(ai_post, title, hashtags):
     """Final captions per platform: the AI's, or a simple template when no AI answered."""
-    ai_post = {k: v for k, v in (ai_post or {}).items() if len(v) >= 12 and " " in v}
+    ai_post = {k: v for k, v in (ai_post or {}).items() if len(v) >= 12 and " " in v and not has_banned(v)}
     if len(set(ai_post.values())) < len(PLATFORMS):   # weak model repeated itself: use templates
         ai_post = {}
     base = (title or "wait for it").strip().rstrip(".")
@@ -68,6 +78,10 @@ def post_captions(ai_post, title, hashtags):
     out = {}
     for pf in PLATFORMS:
         text = ai_post.get(pf) or templates[pf]
+        if CAPTION_LINE and CAPTION_LINE.lower() not in text.lower():
+            # campaign format: "[hook] <required line>" then any extra hashtags
+            hook = re.split(r"\s#", text)[0].strip()
+            text = f"{hook} {CAPTION_LINE}"
         out[pf] = with_tags(text, f"{hashtags} {PLATFORM_TAG[pf] if pf == 'shorts' else ''}")
     return out
 AI_WEIGHT = 0.65
@@ -450,7 +464,7 @@ def write_report(job, hl):
                 f'<span>{html.escape(sc["post"].get(pf, ""))}</span></div>' for pf in PLATFORMS) + "</div>"
         cards.append(f"""
 <article class="card">
-  <video src="clips/{name}.mp4" poster="clips/{name}_preview.png" controls preload="none" playsinline></video>
+  <video src="clips/{name}.mp4" poster="clips/{c.get('cover') or name + '_preview.png'}" controls preload="none" playsinline></video>
   <div class="body">
     <div class="top"><div class="badge" style="--c:{_color(sc.get('total', 0))}">{sc.get('total', '–')}</div>
       <div><div class="rank">#{rank} · {name} · {m}:{s:02d}</div>

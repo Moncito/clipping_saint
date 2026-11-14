@@ -625,10 +625,14 @@ def video_filter(preset, track=None):
                 f"crop={W}:{top}[cam];"
                 f"[g]crop=ih*{W}/{bot}:ih:(iw-ih*{W}/{bot})*{gx}:0,scale={W}:{bot}[game];"
                 f"[cam][game]vstack,setsar=1[base]")
-    # blur: whole frame fit to width, blurred zoomed copy behind it
+    # blur: whole frame fit to width, blurred zoomed copy behind it.
+    # optional "fg_crop": [x, w] keeps only that horizontal slice in the foreground (bigger subject,
+    # e.g. [0.25, 0.75] keeps a top-right logo while cutting empty space on the left)
+    fx, fw = preset.get("fg_crop", [0, 1])
+    fg_crop = f"crop=iw*{fw}:ih:iw*{fx}:0," if fw < 1 else ""
     return (f"[0:v]split[a][b];"
             f"[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=20:2[bg];"
-            f"[b]scale={W}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[base]")
+            f"[b]{fg_crop}scale={W}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[base]")
 
 
 def ass_time(t):
@@ -680,7 +684,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 CAPTION_POP_WORDS = ["no way", "what", "omg", "insane", "crazy", "clutch", "holy", "bro", "wow", "grabe", "hala"]
 
 
-def write_ass(path, words, title, clip_len, preset):
+def parse_story(spec):
+    """'0-4: first line | 4-11: second line' (seconds or m:ss, relative to the clip) -> [(s, e, text)]"""
+    out = []
+    for part in (spec or "").split("|"):
+        m = re.match(r"^\s*([\d:.]+)\s*-\s*([\d:.]+)\s*:\s*(.+?)\s*$", part)
+        if m:
+            out.append((to_sec(m.group(1)), to_sec(m.group(2)), m.group(3)))
+        elif part.strip():
+            sys.exit(f"bad --story part (use 'start-end: text'): {part.strip()}")
+    return out
+
+
+def write_ass(path, words, title, clip_len, preset, story=None, brand=""):
     cap_y = int(preset.get("caption_margin_v", 620))  # distance from bottom
     head = f"""[Script Info]
 ScriptType: v4.00+
@@ -692,13 +708,29 @@ WrapStyle: 0
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Cap,Arial,92,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,7,3,2,60,60,{cap_y},1
 Style: Hook,Arial,68,&H00FFFFFF,&H00FFFFFF,&H00000000,&HC0000000,-1,0,0,0,100,100,0,0,3,18,0,8,70,70,170,1
+Style: Story,Arial,78,&H00FFFFFF,&H00FFFFFF,&H00000000,&HC0000000,-1,0,0,0,100,100,0,0,3,18,0,8,80,80,190,1
+Style: Brand,Arial,58,&H0000C8FF,&H0000C8FF,&H00000000,&HE0000000,-1,0,0,0,100,100,4,0,3,14,0,8,60,60,60,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = []
-    if title:
+    if brand:  # campaign branding that must stay visible the whole clip
+        lines.append(f"Dialogue: 2,{ass_time(0)},{ass_time(clip_len + 1)},Brand,,0,0,0,,{ass_escape(brand.upper())}")
+    for a, b, text in story or []:  # timed story / fact lines (replace the single title hook)
+        lines.append(f"Dialogue: 1,{ass_time(a)},{ass_time(min(b, clip_len + 1))},Story,,0,0,0,,"
+                     "{\\fad(150,150)}" + ass_escape(text))
+    if title and not story:
         lines.append(f"Dialogue: 1,{ass_time(0)},{ass_time(min(3.0, clip_len))},Hook,,0,0,0,,{ass_escape(title.upper())}")
+    words = [{**w, "w": clean_banned(w["w"])} for w in words]
+    # glue fragments like ",400" (from "6,400") or "'s" back onto the word before them
+    merged = []
+    for w in words:
+        if merged and re.match(r"^[,.'’%]\w", w["w"].strip()):
+            merged[-1] = {**merged[-1], "w": merged[-1]["w"] + w["w"].strip(), "e": w["e"]}
+        else:
+            merged.append(dict(w))
+    words = merged
     # chunks of up to 3 words; current word highlighted yellow
     chunks, cur = [], []
     for w in words:
@@ -735,8 +767,131 @@ ENCODERS = {
 }
 
 
+def best_frame_time(src, s, e, samples=12):
+    """Pick the best still for a cover: sharp, not too dark/bright, and with a big face if there is one."""
+    import cv2
+    import numpy as np
+    cap = cv2.VideoCapture(str(src))
+    W0, H0 = cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    dw = 480
+    dh = int(round(dw * H0 / W0)) if W0 else 270
+    find = None
+    try:
+        import reframe
+        find = reframe._detector(dw, dh, log)
+    except Exception:
+        pass
+    a, b = s + 0.5, max(s + 0.6, e - 0.5)
+    best_t, best = (s + e) / 2, -1e9
+    for k in range(samples):
+        t = a + (b - a) * (k + 0.5) / samples
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        small = cv2.resize(frame, (dw, dh))
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        sharp = np.log1p(cv2.Laplacian(gray, cv2.CV_64F).var())
+        light = float(gray.mean())
+        score = sharp - (2.0 if light < 40 or light > 225 else 0.0)
+        if find:
+            faces = find(small)
+            if faces:
+                biggest = max(f[2] * f[3] for f in faces) / (dw * dh)
+                score += 1.5 + 20 * min(biggest, 0.08)
+        if score > best:
+            best_t, best = t, score
+    cap.release()
+    return best_t
+
+
+def make_cover(outdir, name, c, preset, src, args, track=None):
+    """clip_NN_cover.jpg: the best real frame of the clip in the same 9:16 layout, with the hook title big
+    in the middle (inside the 4:5 area Instagram/TikTok grids show). No AI images: real footage + text."""
+    text = c.get("title") or args.text or (parse_story(args.story)[0][2] if args.story else "")
+    # "cover_at" (absolute seconds) in highlights.json picks the frame by hand
+    if c.get("cover_at") is not None:
+        t = float(c["cover_at"])
+    elif getattr(args, "cover_at", None) is not None:   # --cover-at: seconds after the clip start
+        t = c["start"] + args.cover_at
+    else:
+        t = best_frame_time(src, c["start"], c["end"])
+    if track:  # hold the face-tracking crop where it is around that moment
+        rel = t - c["start"]
+        x = min(track, key=lambda k: abs(k[0] - rel))[1]
+        track = [(0.0, x)]
+    graph, bl = video_filter(preset, track), "base"
+    if args.text and args.cover:
+        x, y, w, h = parse_cover(args.cover)
+        graph += f";[base]drawbox=x={x}:y={y}:w={w}:h={h}:color={args.box_color}@1:t=fill[basec]"
+        bl = "basec"
+    ass = outdir / f"{name}_cover.ass"
+    head = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {W}
+PlayResY: {H}
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Cover,Arial,104,&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,9,4,5,70,70,0,1
+Style: CoverBrand,Arial,52,&H0000C8FF,&H0000C8FF,&H00000000,&HE0000000,-1,0,0,0,100,100,4,0,3,14,0,8,60,60,330,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    lines = []
+    if text:
+        # below the picture (faces stay clear) but inside the 4:5 area profile grids show (y 285-1635)
+        lines.append("Dialogue: 1,0:00:00.00,0:00:05.00,Cover,,0,0,0,,{\\pos(540,1460)}" + ass_escape(text.upper()))
+    if args.brand:
+        lines.append("Dialogue: 1,0:00:00.00,0:00:05.00,CoverBrand,,0,0,0,," + ass_escape(args.brand.upper()))
+    ass.write_text(head + "\n".join(lines) + "\n", encoding="utf-8")
+    graph += f";[{bl}]subtitles={ass.name}[v]"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", str(src), "-filter_complex", graph,
+                    "-map", "[v]", "-frames:v", "1", "-q:v", "2", f"{name}_cover.jpg"], cwd=outdir, check=True)
+    c["cover"] = f"{name}_cover.jpg"
+
+
+SAFE_SWAPS = {"fighters": "bots", "fighter": "bot", "fighting": "boxing", "fights": "matches", "fight": "match",
+              "fought": "boxed", "battles": "matches", "battle": "match", "combat": "boxing", "brawl": "scrap",
+              "war": "match", "destroyed": "dropped", "destroys": "drops", "destroy": "drop",
+              "killed": "rocked", "kills": "rocks", "kill": "rock", "ufc": "robot boxing", "mma": "robot boxing"}
+
+
+def clean_banned(word):
+    """Swap a banned campaign word in a caption for an allowed one (on-screen text only; audio is untouched)."""
+    import scorer
+    if not scorer.BANNED:
+        return word
+    core = re.sub(r"[^\w']", "", word).lower()
+    for bad in scorer.BANNED:
+        stem_hit = core.startswith(bad) if bad not in ("war", "kill") else core in (bad, bad + "s", bad + "ed")
+        if stem_hit:
+            swap = SAFE_SWAPS.get(core) or SAFE_SWAPS.get(bad) or "***"
+            return re.sub(re.escape(re.sub(r"[^\w']", "", word)), swap, word, flags=re.I) if core else word
+    return word
+
+
+def check_banned(hl, args):
+    """Campaign word rules: stop before rendering if any on-screen text uses a banned word."""
+    import scorer
+    scorer.BANNED = [w.strip().lower() for w in (args.banned or "").split(",") if w.strip()]
+    scorer.CAPTION_LINE = args.caption_line or ""
+    if not scorer.BANNED:
+        return
+    texts = [(f"clip {n} title", c.get("title", "")) for n, c in enumerate(hl["clips"], 1)]
+    texts += [("--text", args.text or ""), ("--story", args.story or ""), ("--brand", args.brand or "")]
+    bad = [(where, scorer.has_banned(t)) for where, t in texts if t and scorer.has_banned(t)]
+    if bad:
+        sys.exit("banned words in on-screen text (campaign rule): "
+                 + "; ".join(f"{w}: {', '.join(b)}" for w, b in bad))
+
+
 def stage_render(job, args, force):
     hl = load_json(job / "highlights.json")
+    if hl and hl.get("clips"):
+        check_banned(hl, args)
     if not hl or not hl["clips"]:
         sys.exit("render: no highlights.json - run the pick stage first")
     segs = load_json(job / "transcript.json", {"segments": []})["segments"]
@@ -751,7 +906,7 @@ def stage_render(job, args, force):
 
     all_words = [w for s in segs for w in s.get("words", [])]
     z = None
-    use_cuts = bool(not args.text and not args.no_jump_cuts and all_words)
+    use_cuts = bool(not args.text and not args.no_jump_cuts and not args.keep_audio and all_words)
     use_zoom = bool(not args.text and not args.no_zoom)
     if (use_cuts or use_zoom) and (job / "audio.wav").exists():
         import scorer
@@ -802,7 +957,8 @@ def stage_render(job, args, force):
             else:
                 graph += f";[{bl}]subtitles={ass.name}[v]"
         else:
-            write_ass(ass, words if not args.no_captions else [], "" if args.no_hook else c.get("title", ""), out_len, preset)
+            write_ass(ass, words if not args.no_captions else [], "" if args.no_hook else c.get("title", ""), out_len, preset,
+                      story=parse_story(args.story), brand=args.brand)
             graph += f";[{bl}]subtitles={ass.name}[v]"
         base = ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{s:.2f}", "-t", f"{e - s:.2f}", "-i", str(src),
                 "-filter_complex", graph, "-map", "[v]", "-map", amap, "-r", "30"]
@@ -819,12 +975,17 @@ def stage_render(job, args, force):
         # still frame so you (or Claude Code) can check the text fully covers any original text
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{min(1.0, (e - s) / 2):.2f}", "-i", mp4.name,
                         "-frames:v", "1", "-vf", "scale=540:-1", f"{name}_preview.png"], cwd=outdir)
+        if not args.no_cover:
+            try:
+                make_cover(outdir, name, c, preset, src, args, track)
+            except Exception as ex:  # a cover is a bonus; never lose the clip over it
+                log(f"render: cover for {name} failed ({ex})")
         cut = f", {c['cut_seconds']:.0f}s of pauses cut" if c.get("cut_seconds") else ""
         zm = f", {len(c.get('zooms', []))} zooms" if c.get("zooms") else ""
         log(f"render: {mp4.name}  ({out_len:.0f}s{cut}{zm})  {c.get('title', '')}")
         c["out_len"] = round(out_len, 2)
         c["_words_rendered"] = words  # for version B's teaser (dropped before saving)
-    if not args.text and args.variants > 0:
+    if not args.text and not args.keep_audio and args.variants > 0:
         render_variants(job, hl, z, args, encoder)
     for c in hl["clips"]:
         c.pop("_words_rendered", None)
@@ -836,7 +997,9 @@ def render_variants(job, hl, z, args, encoder):
     """Version B of the best clips: the payoff moment plays first (a 2s 'cold open'), then the clip.
     Post both; the learning loop (learn.py) finds out which style works for your audience."""
     clips = list(enumerate(hl["clips"], 1))
-    ranked = sorted(clips, key=lambda t: -t[1].get("score", {}).get("total", 0))[: args.variants]
+    # clips with a hand-picked "payoff" line in highlights.json go first, then the best scored
+    ranked = sorted(clips, key=lambda t: (not t[1].get("payoff"),
+                                          -t[1].get("score", {}).get("total", 0)))[: args.variants]
     for n, c in ranked:
         name = f"clip_{n:02d}"
         src, out = job / "clips" / f"{name}.mp4", job / "clips" / f"{name}_b.mp4"
@@ -865,7 +1028,7 @@ def render_variants(job, hl, z, args, encoder):
             peak = L * 0.7
         # better: the payoff line the AI judge pointed at, found in the transcript
         words = c.get("_words_rendered") or []
-        pl = (c.get("score", {}).get("payoff") or "").lower().split()
+        pl = (c.get("payoff") or c.get("score", {}).get("payoff") or "").lower().split()
         if len(pl) >= 2 and words:
             ws = [w["w"].lower().strip(".,!?\"'") for w in words]
             for i in range(len(ws) - 1):
@@ -878,9 +1041,11 @@ def render_variants(job, hl, z, args, encoder):
             starts = [w["s"] for w in words if a - 0.6 <= w["s"] <= a + 0.6]
             if starts:
                 a = max(0.0, min(starts, key=lambda x: abs(x - a)) - 0.1)
-            ends = [w["e"] for w in words if a + 1.2 <= w["e"] <= a + 3.0]
+            win = [w for w in words if a + 1.0 <= w["e"] <= a + 3.5]
+            full = [w["e"] for w in win if re.search(r"[.!?…]$", w["w"].strip())]   # end on a full sentence
+            ends = full or [w["e"] for w in win]
             if ends:
-                b = min(L, ends[-1] + 0.15)
+                b = min(L, (full[0] if full else ends[-1]) + 0.15)
         txt = " ".join(w["w"] for w in words if a <= w["s"] < b).lower()
         if any(f in txt for f in FILLER_OPENERS):
             log(f"render: skipped version B of {name} (its best moment is an intro / sponsor line)")
@@ -953,6 +1118,8 @@ def cmd_run(args):
            "score": lambda f: stage_score(job, args, f)}
     if args.clips:  # manual times given: no transcription or AI picking needed
         stage_download(job, args.source, start == 0)
+        if not args.text and not args.no_captions:  # story / caption mode needs the words
+            stage_transcribe(job, args, False)
         manual = parse_manual_clips(args.clips)
         if args.text:  # campaign: the approved line doubles as the clip's title / caption base
             for c in manual:
@@ -1047,6 +1214,18 @@ def main():
     r.add_argument("--no-zoom", action="store_true", help="no punch-in zooms on loud / hype moments")
     r.add_argument("--variants", type=int, default=2,
                    help="also render a 'payoff first' version B of the N best clips (0 = off)")
+    r.add_argument("--keep-audio", action="store_true",
+                   help="campaign rule 'original music unchanged': no jump cuts, no version B (trimming only)")
+    r.add_argument("--brand", default="", help="brand tag shown the whole clip, e.g. \"MOVIETONE NEWS\"")
+    r.add_argument("--no-cover", action="store_true", help="don't make clip_NN_cover.jpg cover photos")
+    r.add_argument("--cover-at", type=float, default=None,
+                   help="cover frame = this many seconds after each clip's start (default: auto-pick)")
+    r.add_argument("--banned", default="",
+                   help="comma-separated words the campaign forbids in on-screen text, titles and captions")
+    r.add_argument("--caption-line", default="",
+                   help="line every post caption must contain after the hook, e.g. \"Follow @ufbots on Instagram #UltimateBots\"")
+    r.add_argument("--story", default="",
+                   help="timed on-screen lines replacing the title hook: \"0-4: line one | 4-11: line two\"")
     r.add_argument("--hashtags", default="", help="hashtags every post caption must include, e.g. \"#lany\"")
     r.set_defaults(func=cmd_run)
 
